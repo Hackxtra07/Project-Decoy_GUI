@@ -1,0 +1,32 @@
+def get_geolocation():
+        """Get geolocation based on public IP"""
+        try:
+            import requests
+            # Using ip-api.com (No API key required for low volume)
+            response = requests.get("http://ip-api.com/json/", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'success':
+                    return {
+                        'country': data.get('country'),
+                        'regionName': data.get('regionName'),
+                        'city': data.get('city'),
+                        'lat': data.get('lat'),
+                        'lon': data.get('lon'),
+                        'isp': data.get('isp'),
+                        'query': data.get('query') # Public IP
+                    }
+            return {'error': 'Failed to get location from API'}
+        except Exception as e:
+            # Fallback to a simpler service or just return error
+            try:
+                import urllib.request
+                import json
+                with urllib.request.urlopen("https://ipapi.co/json/", timeout=10) as url:
+                    data = json.loads(url.read().decode())
+                    return {
+                        'country': data.get('country_name'),
+                        'regionName': data.get('region'),
+                        'city': data.get('city'),
+                        'lat': data.get('latitude'),
+                        'lon': data.get(

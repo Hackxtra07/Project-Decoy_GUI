@@ -1,20 +1,25 @@
-# v0 sandbox internal files
-__v0_runtime_loader.js
-__v0_devtools.tsx
-__v0_jsx-dev-runtime.ts
-.snowflake/
-.v0-trash/
-.vercel/
-next.user-config.*
+# Build and runtime dependencies
+node_modules/
+.next/
+dist/
+build/
+
+# Logs and databases
+*.log
+*.sqlite
+data/
+loot/
 
 # Environment variables
 .env*.local
 
-# Common ignores
-node_modules
-.next/
+# System files
 .DS_Store
-loot
-data
-venv
-rat.log
+Thumbs.db
+
+# Executables and build specs
+*.exe
+*.spec
+s.exe
+d.spec
+s.spec

