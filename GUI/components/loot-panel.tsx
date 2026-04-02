@@ -8,12 +8,12 @@ import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 
 interface LootFile {
+  id: string
   name: string
   path: string
   size: number
   type: string
   mtime: string
-  isDirectory: boolean
 }
 
 export default function LootPanel() {
@@ -25,10 +25,11 @@ export default function LootPanel() {
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [stats, setStats] = useState<any>(null)
 
-  const fetchFiles = async (dir: string) => {
+  const fetchFiles = async (type?: string) => {
     setLoading(true)
     try {
-      const res = await fetch(`/api/loot?dir=${encodeURIComponent(dir)}`)
+      const url = type ? `/api/loot?type=${type}` : '/api/loot'
+      const res = await fetch(url)
       const data = await res.json()
       if (data.success) {
         setFiles(data.data)
@@ -60,32 +61,35 @@ export default function LootPanel() {
   const openFile = async (file: LootFile) => {
     setSelectedFile(file)
     setFileContent(null)
-    if (!file.isDirectory) {
-        try {
-            const res = await fetch(`/api/loot/view?file=${encodeURIComponent(file.path)}`)
-            if (res.ok) {
-                const contentType = res.headers.get('content-type')
-                if (contentType?.startsWith('image/')) {
-                    setFileContent('IMAGE_DISPLAY') // Special marker
-                } else if (contentType === 'application/json' || file.path.endsWith('.json')) {
+    try {
+        const res = await fetch(`/api/loot/view?id=${file.id}`)
+        if (res.ok) {
+            const contentType = res.headers.get('content-type')
+            if (contentType?.startsWith('image/')) {
+                setFileContent('IMAGE_DISPLAY') // Special marker
+            } else if (contentType === 'application/json' || file.name.endsWith('.json')) {
+                try {
                     const data = await res.json()
                     setFileContent(JSON.stringify(data, null, 2))
-                } else if (contentType?.startsWith('text/') || 
-                          ['txt', 'log', 'ps1', 'bat', 'py', 'sh', 'ini', 'conf', 'yml', 'yaml'].includes(file.type)) {
+                } catch {
                     const text = await res.text()
                     setFileContent(text)
-                } else if (contentType === 'application/x-sqlite3' || ['db', 'sqlite', 'sqlite3'].includes(file.type)) {
-                    setFileContent('BINARY_DATABASE') // Special marker
-                } else {
-                    // Try as text as fallback
-                    const text = await res.text()
-                    setFileContent(text.slice(0, 100000)) // Cap to 100k
                 }
+            } else if (contentType?.startsWith('text/') || 
+                      ['txt', 'log', 'ps1', 'bat', 'py', 'sh', 'ini', 'conf', 'yml', 'yaml'].includes(file.type)) {
+                const text = await res.text()
+                setFileContent(text)
+            } else if (contentType === 'application/x-sqlite3' || ['db', 'sqlite', 'sqlite3'].includes(file.type)) {
+                setFileContent('BINARY_DATABASE') // Special marker
+            } else {
+                // Try as text as fallback
+                const text = await res.text()
+                setFileContent(text.slice(0, 100000)) // Cap to 100k
             }
-        } catch (err) {
-            console.error(err)
-            setFileContent('Error loading file content')
         }
+    } catch (err) {
+        console.error(err)
+        setFileContent('Error loading file content')
     }
   }
 
@@ -124,10 +128,10 @@ export default function LootPanel() {
       {stats && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           {Object.entries(stats).map(([cat, s]: [string, any]) => (
-            <Card key={cat} className="bg-card/50">
+            <Card key={cat} className={`bg-card/50 cursor-pointer transition-colors ${currentDir === cat ? 'ring-2 ring-primary' : 'hover:bg-card'}`} onClick={() => setCurrentDir(currentDir === cat ? '' : cat)}>
               <CardContent className="pt-6">
                 <div className="flex items-center justify-between mb-2">
-                  <Badge variant="outline" className="capitalize">{cat.replace('_', ' ')}</Badge>
+                  <Badge variant={currentDir === cat ? 'default' : 'outline'} className="capitalize">{cat.replace('_', ' ')}</Badge>
                   <Clock className="w-4 h-4 text-muted-foreground" />
                 </div>
                 <div className="mt-2">
@@ -147,20 +151,7 @@ export default function LootPanel() {
       <Card className="border-border">
         <CardHeader className="flex flex-row items-center justify-between border-b pb-4">
           <div className="flex items-center gap-2">
-            {currentDir && (
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                onClick={() => {
-                  const parts = currentDir.split('/')
-                  parts.pop()
-                  setCurrentDir(parts.join('/'))
-                }}
-              >
-                <ArrowLeft className="w-4 h-4" />
-              </Button>
-            )}
-            <CardTitle className="text-sm font-mono">{currentDir || 'root'}/</CardTitle>
+            <CardTitle className="text-sm font-mono">{currentDir ? `Category: ${currentDir.replace('_', ' ')}` : 'All Collected Loot'}</CardTitle>
           </div>
           <p className="text-xs text-muted-foreground">{filteredFiles.length} items</p>
         </CardHeader>
@@ -184,32 +175,26 @@ export default function LootPanel() {
                 <tbody className="divide-y">
                   {filteredFiles.map((file) => (
                     <tr 
-                      key={file.path} 
+                      key={file.id} 
                       className="hover:bg-muted/20 group cursor-pointer"
-                      onClick={() => file.isDirectory ? setCurrentDir(file.path) : openFile(file)}
+                      onClick={() => openFile(file)}
                     >
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
-                          {file.isDirectory ? (
-                            <Folder className="w-4 h-4 text-blue-400 fill-blue-400/20" />
-                          ) : (
-                             file.type.match(/png|jpg|jpeg/) ? <ImageIcon className="w-4 h-4 text-purple-400" /> : <FileText className="w-4 h-4 text-muted-foreground" />
-                          )}
+                          {file.type.match(/png|jpg|jpeg/) ? <ImageIcon className="w-4 h-4 text-purple-400" /> : <FileText className="w-4 h-4 text-muted-foreground" />}
                           <span className="font-medium">{file.name}</span>
                         </div>
                       </td>
                       <td className="py-3 px-4 capitalize text-muted-foreground">{file.type}</td>
-                      <td className="py-3 px-4 text-right text-muted-foreground">{file.isDirectory ? '-' : formatSize(file.size)}</td>
+                      <td className="py-3 px-4 text-right text-muted-foreground">{formatSize(file.size)}</td>
                       <td className="py-3 px-4 text-right text-xs text-muted-foreground font-mono">
                         {new Date(file.mtime).toLocaleString()}
                       </td>
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                          {!file.isDirectory && (
-                            <Button variant="ghost" size="icon" className="h-8 w-8">
-                              <Eye className="w-4 h-4" />
-                            </Button>
-                          )}
+                           <Button variant="ghost" size="icon" className="h-8 w-8">
+                             <Eye className="w-4 h-4" />
+                           </Button>
                            <Button variant="ghost" size="icon" className="h-8 w-8">
                             <Download className="w-4 h-4" />
                           </Button>
@@ -225,7 +210,7 @@ export default function LootPanel() {
       </Card>
 
       {/* File Previewer */}
-      {selectedFile && !selectedFile.isDirectory && (
+      {selectedFile && (
         <Card className="fixed inset-4 md:inset-10 z-50 flex flex-col bg-background/95 backdrop-blur-md shadow-2xl border-sidebar-border overflow-hidden animate-in zoom-in duration-200">
            <CardHeader className="border-b flex flex-row items-center justify-between px-6 py-4">
              <div className="flex items-center gap-3">
@@ -243,7 +228,7 @@ export default function LootPanel() {
                 {fileContent === 'IMAGE_DISPLAY' ? (
                     <div className="w-full h-full flex items-center justify-center p-4">
                         <img 
-                            src={`/api/loot/view?file=${encodeURIComponent(selectedFile.path)}`} 
+                            src={`/api/loot/view?id=${selectedFile.id}`} 
                             alt={selectedFile.name}
                             className="max-w-full max-h-full object-contain rounded-lg shadow-xl shadow-black/60"
                         />
@@ -253,7 +238,7 @@ export default function LootPanel() {
                         <Database className="w-16 h-16 text-cyan-500 opacity-50" />
                         <h3 className="text-xl font-bold text-foreground">SQLite Database Captured</h3>
                         <p className="max-w-md">This is a binary database file. You can download it to explore its contents using a local database viewer.</p>
-                        <Button variant="outline" className="mt-2" onClick={() => window.open(`/api/loot/view?file=${encodeURIComponent(selectedFile.path)}`)}>
+                        <Button variant="outline" className="mt-2" onClick={() => window.open(`/api/loot/view?id=${selectedFile.id}`)}>
                             <Download className="w-4 h-4 mr-2" /> Download Database
                         </Button>
                     </div>
