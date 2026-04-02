@@ -16,16 +16,16 @@ export async function GET(request: NextRequest) {
     }
 
     if (action === 'stats') {
-      const stats = getCredentialStats(clientId)
+      const stats = await getCredentialStats(clientId)
       return NextResponse.json(stats)
     }
 
     if (action === 'search' && query) {
-      const results = searchCredentials(clientId, query)
+      const results = await searchCredentials(clientId, query)
       return NextResponse.json(results)
     }
 
-    const credentials = getClientCredentials(clientId)
+    const credentials = await getClientCredentials(clientId)
     return NextResponse.json(credentials)
   } catch (error) {
     console.error('[Credentials API] Error:', error)
@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
 
-    const credential = recordCredential({
+    const credential = await recordCredential({
       client_id: body.client_id,
       credential_type: body.credential_type,
       username: body.username,

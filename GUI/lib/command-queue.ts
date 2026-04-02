@@ -16,41 +16,23 @@ export interface Command {
 }
 
 export class CommandQueue {
-  private db = getDatabase()
-
-  queueCommand(data: {
+  async queueCommand(data: {
     client_id: string
     command_type: string
     command_name: string
     parameters?: Record<string, any>
-  }): Command {
+  }): Promise<Command> {
+    const db = await getDatabase()
     const id = uuidv4()
     const now = new Date().toISOString()
-    const parameters = data.parameters ? JSON.stringify(data.parameters) : null
+    const parameters = data.parameters || null
 
-    const stmt = this.db.prepare(`
-      INSERT INTO commands (
-        id, client_id, command_type, command_name, parameters, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-
-    stmt.run(
-      id,
-      data.client_id,
-      data.command_type,
-      data.command_name,
-      parameters,
-      'pending',
-      now,
-      now
-    )
-
-    return {
+    const command: Command = {
       id,
       client_id: data.client_id,
       command_type: data.command_type,
       command_name: data.command_name,
-      parameters,
+      parameters: parameters ? JSON.stringify(parameters) : null, // Keep string for interface compatibility if needed, but Mongo stores as object
       status: 'pending',
       result: null,
       error_message: null,
@@ -58,95 +40,120 @@ export class CommandQueue {
       created_at: now,
       updated_at: now,
     }
+
+    await db.collection('commands').insertOne({
+      ...command,
+      parameters: parameters // Store as object in Mongo
+    })
+
+    return command
   }
 
-  getCommand(id: string): Command | null {
-    const stmt = this.db.prepare('SELECT * FROM commands WHERE id = ?')
-    return stmt.get(id) as Command | null
+  async getCommand(id: string): Promise<Command | null> {
+    const db = await getDatabase()
+    const row = await db.collection('commands').findOne({ id }) as any
+    if (!row) return null
+    return {
+      ...row,
+      parameters: row.parameters ? JSON.stringify(row.parameters) : null
+    } as Command
   }
 
-  getClientCommands(client_id: string, limit = 50): Command[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM commands WHERE client_id = ? ORDER BY created_at DESC LIMIT ?
-    `)
-    return stmt.all(client_id, limit) as Command[]
+  async getClientCommands(client_id: string, limit = 50): Promise<Command[]> {
+    const db = await getDatabase()
+    const rows = await db.collection('commands')
+      .find({ client_id })
+      .sort({ created_at: -1 })
+      .limit(limit)
+      .toArray() as any[]
+    return rows.map(r => ({ ...r, parameters: r.parameters ? JSON.stringify(r.parameters) : null })) as Command[]
   }
 
-  getPendingCommands(client_id: string): Command[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM commands WHERE client_id = ? AND status = 'pending' ORDER BY created_at ASC
-    `)
-    return stmt.all(client_id) as Command[]
+  async getPendingCommands(client_id: string): Promise<Command[]> {
+    const db = await getDatabase()
+    const rows = await db.collection('commands')
+      .find({ client_id, status: 'pending' })
+      .sort({ created_at: 1 })
+      .toArray() as any[]
+    return rows.map(r => ({ ...r, parameters: r.parameters ? JSON.stringify(r.parameters) : null })) as Command[]
   }
 
-  getAllPendingCommands(): Command[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM commands WHERE status = 'pending' ORDER BY created_at ASC
-    `)
-    return stmt.all() as Command[]
+  async getAllPendingCommands(): Promise<Command[]> {
+    const db = await getDatabase()
+    const rows = await db.collection('commands')
+      .find({ status: 'pending' })
+      .sort({ created_at: 1 })
+      .toArray() as any[]
+    return rows.map(r => ({ ...r, parameters: r.parameters ? JSON.stringify(r.parameters) : null })) as Command[]
   }
 
-  updateCommandStatus(
+  async updateCommandStatus(
     id: string,
     status: 'executing' | 'completed' | 'failed',
     result?: string,
     error?: string
-  ): void {
+  ): Promise<void> {
+    const db = await getDatabase()
     const now = new Date().toISOString()
-    const execution_time = status === 'executing' ? now : null
+    const update: any = { status, updated_at: now }
+    if (status === 'executing') update.execution_time = now
+    if (result) update.result = result
+    if (error) update.error_message = error
 
-    const stmt = this.db.prepare(`
-      UPDATE commands SET status = ?, result = ?, error_message = ?, execution_time = ?, updated_at = ? WHERE id = ?
-    `)
-
-    stmt.run(status, result || null, error || null, execution_time, now, id)
+    await db.collection('commands').updateOne({ id }, { $set: update })
   }
 
-  completeCommand(id: string, result: string): void {
+  async completeCommand(id: string, result: string): Promise<void> {
+    const db = await getDatabase()
     const now = new Date().toISOString()
-    const stmt = this.db.prepare(`
-      UPDATE commands SET status = 'completed', result = ?, updated_at = ? WHERE id = ?
-    `)
-    stmt.run(result, now, id)
+    await db.collection('commands').updateOne(
+      { id },
+      { $set: { status: 'completed', result, updated_at: now } }
+    )
   }
 
-  failCommand(id: string, error: string): void {
+  async failCommand(id: string, error: string): Promise<void> {
+    const db = await getDatabase()
     const now = new Date().toISOString()
-    const stmt = this.db.prepare(`
-      UPDATE commands SET status = 'failed', error_message = ?, updated_at = ? WHERE id = ?
-    `)
-    stmt.run(error, now, id)
+    await db.collection('commands').updateOne(
+      { id },
+      { $set: { status: 'failed', error_message: error, updated_at: now } }
+    )
   }
 
-  cancelCommand(id: string): void {
-    const command = this.getCommand(id)
+  async cancelCommand(id: string): Promise<void> {
+    const command = await this.getCommand(id)
     if (command && command.status === 'pending') {
-      this.failCommand(id, 'Cancelled by user')
+      await this.failCommand(id, 'Cancelled by user')
     }
   }
 
-  getCommandStats() {
-    const pending = this.db.prepare("SELECT COUNT(*) as count FROM commands WHERE status = 'pending'").get() as { count: number }
-    const executing = this.db.prepare("SELECT COUNT(*) as count FROM commands WHERE status = 'executing'").get() as { count: number }
-    const completed = this.db.prepare("SELECT COUNT(*) as count FROM commands WHERE status = 'completed'").get() as { count: number }
-    const failed = this.db.prepare("SELECT COUNT(*) as count FROM commands WHERE status = 'failed'").get() as { count: number }
+  async getCommandStats() {
+    const db = await getDatabase()
+    const pending = await db.collection('commands').countDocuments({ status: 'pending' })
+    const executing = await db.collection('commands').countDocuments({ status: 'executing' })
+    const completed = await db.collection('commands').countDocuments({ status: 'completed' })
+    const failed = await db.collection('commands').countDocuments({ status: 'failed' })
 
     return {
-      pending: pending.count,
-      executing: executing.count,
-      completed: completed.count,
-      failed: failed.count,
-      total: pending.count + executing.count + completed.count + failed.count,
+      pending,
+      executing,
+      completed,
+      failed,
+      total: pending + executing + completed + failed,
     }
   }
 
-  clearOldCommands(days = 30): void {
+  async clearOldCommands(days = 30): Promise<void> {
+    const db = await getDatabase()
     const date = new Date()
     date.setDate(date.getDate() - days)
     const timestamp = date.toISOString()
 
-    const stmt = this.db.prepare('DELETE FROM commands WHERE created_at < ? AND status IN (?, ?)')
-    stmt.run(timestamp, 'completed', 'failed')
+    await db.collection('commands').deleteMany({
+      created_at: { $lt: timestamp },
+      status: { $in: ['completed', 'failed'] }
+    })
   }
 }
 

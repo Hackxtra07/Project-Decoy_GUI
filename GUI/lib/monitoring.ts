@@ -1,7 +1,7 @@
 import { getDatabase } from './db'
 
 export interface SystemMetrics {
-  id: number
+  id?: any // MongoDB using _id usually
   client_id: string
   cpu_usage: number
   memory_usage: number
@@ -26,194 +26,143 @@ export interface CreateMetricsInput {
   network_connections?: any
 }
 
-export function recordMetrics(input: CreateMetricsInput): SystemMetrics {
-  const db = getDatabase()
+export async function recordMetrics(input: CreateMetricsInput): Promise<SystemMetrics> {
+  const db = await getDatabase()
   const now = new Date().toISOString()
 
-  const stmt = db.prepare(`
-    INSERT INTO system_info 
-    (client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total, network_interfaces, running_processes, network_connections, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `)
+  const metrics: SystemMetrics = {
+    client_id: input.client_id,
+    cpu_usage: input.cpu_usage,
+    memory_usage: input.memory_usage,
+    memory_total: input.memory_total,
+    disk_usage: input.disk_usage,
+    disk_total: input.disk_total,
+    network_interfaces: input.network_interfaces || [],
+    running_processes: input.running_processes || [],
+    network_connections: input.network_connections || [],
+    timestamp: now
+  }
 
-  stmt.run(
-    input.client_id,
-    input.cpu_usage,
-    input.memory_usage,
-    input.memory_total,
-    input.disk_usage,
-    input.disk_total,
-    input.network_interfaces ? JSON.stringify(input.network_interfaces) : null,
-    input.running_processes ? JSON.stringify(input.running_processes) : null,
-    input.network_connections ? JSON.stringify(input.network_connections) : null,
-    now
-  )
-
-  // Get the last inserted record
-  const result = db.prepare('SELECT last_insert_rowid() as id').get() as any
-  return getMetrics(result.id)!
+  const result = await db.collection('system_info').insertOne(metrics)
+  return { ...metrics, id: result.insertedId }
 }
 
-export function getMetrics(id: number): SystemMetrics | null {
-  const db = getDatabase()
-  const stmt = db.prepare('SELECT * FROM system_info WHERE id = ?')
-  const row = stmt.get(id) as any
+export async function getClientLatestMetrics(clientId: string): Promise<SystemMetrics | null> {
+  const db = await getDatabase()
+  const row = await db.collection('system_info')
+    .find({ client_id: clientId })
+    .sort({ timestamp: -1 })
+    .limit(1)
+    .next() as any
   
   if (!row) return null
-  
   return formatMetrics(row)
 }
 
-export function getClientLatestMetrics(clientId: string): SystemMetrics | null {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM system_info 
-    WHERE client_id = ? 
-    ORDER BY timestamp DESC 
-    LIMIT 1
-  `)
+export async function getClientMetricsHistory(clientId: string, limit = 100): Promise<SystemMetrics[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('system_info')
+    .find({ client_id: clientId })
+    .sort({ timestamp: -1 })
+    .limit(limit)
+    .toArray() as any[]
   
-  const row = stmt.get(clientId) as any
-  if (!row) return null
-  
-  return formatMetrics(row)
-}
-
-export function getClientMetricsHistory(clientId: string, limit = 100): SystemMetrics[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM system_info 
-    WHERE client_id = ? 
-    ORDER BY timestamp DESC 
-    LIMIT ?
-  `)
-  
-  const rows = stmt.all(clientId, limit) as any[]
   return rows.map(formatMetrics)
 }
 
-export function getClientMetricsSince(clientId: string, minutes = 60): SystemMetrics[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM system_info 
-    WHERE client_id = ? 
-      AND timestamp > datetime('now', '-' || ? || ' minutes')
-    ORDER BY timestamp DESC
-  `)
+export async function getClientMetricsSince(clientId: string, minutes = 60): Promise<SystemMetrics[]> {
+  const db = await getDatabase()
+  const dateLimit = new Date();
+  dateLimit.setMinutes(dateLimit.getMinutes() - minutes);
+
+  const rows = await db.collection('system_info')
+    .find({ 
+      client_id: clientId, 
+      timestamp: { $gt: dateLimit.toISOString() } 
+    })
+    .sort({ timestamp: -1 })
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId, minutes) as any[]
   return rows.map(formatMetrics)
 }
 
-export function getAverageMetrics(clientId: string, minutes = 60): {
+export async function getAverageMetrics(clientId: string, minutes = 60): Promise<{
   avg_cpu: number
   avg_memory: number
   avg_disk: number
-} {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT 
-      AVG(cpu_usage) as avg_cpu,
-      AVG(memory_usage) as avg_memory,
-      AVG(disk_usage) as avg_disk
-    FROM system_info 
-    WHERE client_id = ? 
-      AND timestamp > datetime('now', '-' || ? || ' minutes')
-  `)
-  
-  const result = stmt.get(clientId, minutes) as any
+}> {
+  const db = await getDatabase()
+  const dateLimit = new Date();
+  dateLimit.setMinutes(dateLimit.getMinutes() - minutes);
+
+  const stats = await db.collection('system_info').aggregate([
+    {
+      $match: {
+        client_id: clientId,
+        timestamp: { $gt: dateLimit.toISOString() }
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        avg_cpu: { $avg: "$cpu_usage" },
+        avg_memory: { $avg: "$memory_usage" },
+        avg_disk: { $avg: "$disk_usage" }
+      }
+    }
+  ]).next() as any
+
   return {
-    avg_cpu: result.avg_cpu || 0,
-    avg_memory: result.avg_memory || 0,
-    avg_disk: result.avg_disk || 0,
+    avg_cpu: stats?.avg_cpu || 0,
+    avg_memory: stats?.avg_memory || 0,
+    avg_disk: stats?.avg_disk || 0,
   }
 }
 
-export function deleteOldMetrics(daysOld = 7): number {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    DELETE FROM system_info 
-    WHERE timestamp < datetime('now', '-' || ? || ' days')
-  `)
-  
-  const result = stmt.run(daysOld)
-  return result.changes ?? 0
+export async function deleteOldMetrics(daysOld = 7): Promise<number> {
+  const db = await getDatabase()
+  const dateLimit = new Date();
+  dateLimit.setDate(dateLimit.getDate() - daysOld);
+
+  const result = await db.collection('system_info').deleteMany({
+    timestamp: { $lt: dateLimit.toISOString() }
+  })
+  return result.deletedCount ?? 0
 }
 
-export function getNetworkStats(clientId: string): {
+export async function getNetworkStats(clientId: string): Promise<{
   connections: number
   interfaces: string[]
-} {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT network_connections, network_interfaces 
-    FROM system_info 
-    WHERE client_id = ? 
-    ORDER BY timestamp DESC 
-    LIMIT 1
-  `)
+}> {
+  const latest = await getClientLatestMetrics(clientId)
   
-  const row = stmt.get(clientId) as any
-  
-  if (!row) {
+  if (!latest) {
     return { connections: 0, interfaces: [] }
   }
 
-  let connections = 0
-  let interfaces: string[] = []
-
-  try {
-    if (row.network_connections) {
-      const parsed = JSON.parse(row.network_connections)
-      connections = Array.isArray(parsed) ? parsed.length : 0
-    }
-    if (row.network_interfaces) {
-      const parsed = JSON.parse(row.network_interfaces)
-      interfaces = Array.isArray(parsed) ? parsed.map((i: any) => i.name || i) : []
-    }
-  } catch (e) {
-    console.error('[Monitoring] Error parsing network data:', e)
-  }
+  const connections = Array.isArray(latest.network_connections) ? latest.network_connections.length : 0
+  const interfaces = Array.isArray(latest.network_interfaces) ? latest.network_interfaces.map((i: any) => i.name || i) : []
 
   return { connections, interfaces }
 }
 
-export function getRunningProcesses(clientId: string): any[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT running_processes 
-    FROM system_info 
-    WHERE client_id = ? 
-    ORDER BY timestamp DESC 
-    LIMIT 1
-  `)
-  
-  const row = stmt.get(clientId) as any
-  
-  if (!row || !row.running_processes) {
-    return []
-  }
-
-  try {
-    return JSON.parse(row.running_processes)
-  } catch (e) {
-    console.error('[Monitoring] Error parsing processes data:', e)
-    return []
-  }
+export async function getRunningProcesses(clientId: string): Promise<any[]> {
+  const latest = await getClientLatestMetrics(clientId)
+  return latest?.running_processes || []
 }
 
 function formatMetrics(row: any): SystemMetrics {
   return {
-    id: row.id,
+    id: row._id || row.id,
     client_id: row.client_id,
     cpu_usage: row.cpu_usage,
     memory_usage: row.memory_usage,
     memory_total: row.memory_total,
     disk_usage: row.disk_usage,
     disk_total: row.disk_total,
-    network_interfaces: row.network_interfaces ? JSON.parse(row.network_interfaces) : undefined,
-    running_processes: row.running_processes ? JSON.parse(row.running_processes) : undefined,
-    network_connections: row.network_connections ? JSON.parse(row.network_connections) : undefined,
+    network_interfaces: row.network_interfaces,
+    running_processes: row.running_processes,
+    network_connections: row.network_connections,
     timestamp: row.timestamp,
   }
 }

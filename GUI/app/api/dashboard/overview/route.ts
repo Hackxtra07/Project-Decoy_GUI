@@ -7,13 +7,13 @@ import { systemMonitor } from '@/lib/system-monitor'
 
 export async function GET(request: NextRequest) {
   try {
-    const clientStats = clientManager.getClientStats()
-    const commandStats = commandQueue.getCommandStats()
-    const fileStats = fileOperations.getFileStats()
-    const sessionStats = sessionManager.getSessionStats()
+    const clientStats = await clientManager.getClientStats()
+    const commandStats = await commandQueue.getCommandStats()
+    const fileStats = await fileOperations.getFileStats()
+    const sessionStats = await sessionManager.getSessionStats()
 
-    const clients = clientManager.getAllClients()
-    const latestMetrics = systemMonitor.getAllLatestMetrics()
+    const clients = await clientManager.getAllClients()
+    const latestMetrics = await systemMonitor.getAllLatestMetrics()
 
     // Calculate system-wide metrics
     let totalCpu = 0

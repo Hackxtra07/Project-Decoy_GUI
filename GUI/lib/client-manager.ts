@@ -19,9 +19,7 @@ export interface Client {
 }
 
 export class ClientManager {
-  private db = getDatabase()
-
-  registerClient(data: {
+  async registerClient(data: {
     hostname: string
     username: string
     os: string
@@ -31,98 +29,92 @@ export class ClientManager {
     gpu?: string
     motherboard?: string
     uptime?: number
-  }): Client {
+  }): Promise<Client> {
+    const db = await getDatabase()
     const id = uuidv4()
     const now = new Date().toISOString()
 
-    const stmt = this.db.prepare(`
-      INSERT INTO clients (
-        id, hostname, username, os, ip_address, architecture, is_admin, status, gpu, motherboard, uptime, last_seen, first_seen, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-
-    stmt.run(
-      id,
-      data.hostname,
-      data.username,
-      data.os,
-      data.ip_address,
-      data.architecture || 'x64',
-      data.is_admin ? 1 : 0,
-      'online',
-      data.gpu || null,
-      data.motherboard || null,
-      data.uptime || 0,
-      now,
-      now,
-      now
-    )
-
-    return {
+    const client: Client = {
       id,
       hostname: data.hostname,
       username: data.username,
       os: data.os,
       ip_address: data.ip_address,
       architecture: data.architecture || 'x64',
-      is_admin: data.is_admin || false,
+      is_admin: !!data.is_admin,
       status: 'online',
-      gpu: data.gpu,
-      motherboard: data.motherboard,
-      uptime: data.uptime,
+      gpu: data.gpu || undefined,
+      motherboard: data.motherboard || undefined,
+      uptime: data.uptime || 0,
       last_seen: now,
       first_seen: now,
       created_at: now,
     }
+
+    await db.collection('clients').insertOne(client)
+    return client
   }
 
-  getClient(id: string): Client | null {
-    const stmt = this.db.prepare('SELECT * FROM clients WHERE id = ?')
-    return stmt.get(id) as Client | null
+  async getClient(id: string): Promise<Client | null> {
+    const db = await getDatabase()
+    const row = await db.collection('clients').findOne({ id }) as any
+    return row as Client | null
   }
 
-  getAllClients(): Client[] {
-    const stmt = this.db.prepare('SELECT * FROM clients ORDER BY last_seen DESC')
-    return stmt.all() as Client[]
+  async getAllClients(): Promise<Client[]> {
+    const db = await getDatabase()
+    const rows = await db.collection('clients').find().sort({ last_seen: -1 }).toArray() as any[]
+    return rows as Client[]
   }
 
-  getOnlineClients(): Client[] {
-    const stmt = this.db.prepare("SELECT * FROM clients WHERE status = 'online' ORDER BY last_seen DESC")
-    return stmt.all() as Client[]
+  async getOnlineClients(): Promise<Client[]> {
+    const db = await getDatabase()
+    const rows = await db.collection('clients')
+      .find({ status: 'online' })
+      .sort({ last_seen: -1 })
+      .toArray() as any[]
+    return rows as Client[]
   }
 
-  updateClientStatus(id: string, status: 'online' | 'offline'): void {
+  async updateClientStatus(id: string, status: 'online' | 'offline'): Promise<void> {
+    const db = await getDatabase()
     const now = new Date().toISOString()
-    const stmt = this.db.prepare('UPDATE clients SET status = ?, last_seen = ? WHERE id = ?')
-    stmt.run(status, now, id)
+    await db.collection('clients').updateOne(
+      { id },
+      { $set: { status, last_seen: now } }
+    )
   }
 
-  updateClientLastSeen(id: string): void {
+  async updateClientLastSeen(id: string): Promise<void> {
+    const db = await getDatabase()
     const now = new Date().toISOString()
-    const stmt = this.db.prepare('UPDATE clients SET last_seen = ? WHERE id = ?')
-    stmt.run(now, id)
+    await db.collection('clients').updateOne(
+      { id },
+      { $set: { last_seen: now } }
+    )
   }
 
-  deleteClient(id: string): void {
-    const stmt = this.db.prepare('DELETE FROM clients WHERE id = ?')
-    stmt.run(id)
+  async deleteClient(id: string): Promise<void> {
+    const db = await getDatabase()
+    await db.collection('clients').deleteOne({ id })
   }
 
-  getClientStats() {
-    const total = this.db.prepare('SELECT COUNT(*) as count FROM clients').get() as { count: number }
-    const online = this.db.prepare("SELECT COUNT(*) as count FROM clients WHERE status = 'online'").get() as { count: number }
-    const admins = this.db.prepare('SELECT COUNT(*) as count FROM clients WHERE is_admin = 1').get() as { count: number }
+  async getClientStats() {
+    const db = await getDatabase()
+    const total = await db.collection('clients').countDocuments()
+    const online = await db.collection('clients').countDocuments({ status: 'online' })
+    const admins = await db.collection('clients').countDocuments({ is_admin: true })
 
     return {
-      totalClients: total.count,
-      onlineClients: online.count,
-      adminClients: admins.count,
-      offlineClients: total.count - online.count,
+      totalClients: total,
+      onlineClients: online,
+      adminClients: admins,
+      offlineClients: total - online,
     }
   }
 
-  getClientsSummary() {
-    const clients = this.getAllClients()
+  async getClientsSummary() {
+    const clients = await this.getAllClients()
     return clients.map(client => ({
       ...client,
       is_admin: Boolean(client.is_admin),

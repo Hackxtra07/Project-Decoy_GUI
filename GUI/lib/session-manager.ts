@@ -13,32 +13,27 @@ export interface Session {
 }
 
 export class SessionManager {
-  private db = getDatabase()
   private sessions = new Map<string, { token: string; expires: number }>()
 
-  createSession(data: {
+  async createSession(data: {
     username: string
     ip_address?: string
     user_agent?: string
-  }): { session_id: string; token: string } {
+  }): Promise<{ session_id: string; token: string }> {
+    const db = await getDatabase()
     const id = uuidv4()
     const token = crypto.randomBytes(32).toString('hex')
     const now = new Date().toISOString()
 
-    const stmt = this.db.prepare(`
-      INSERT INTO sessions (id, username, login_time, last_activity, ip_address, user_agent, is_active)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `)
-
-    stmt.run(
+    await db.collection('sessions').insertOne({
       id,
-      data.username,
-      now,
-      now,
-      data.ip_address || null,
-      data.user_agent || null,
-      1
-    )
+      username: data.username,
+      login_time: now,
+      last_activity: now,
+      ip_address: data.ip_address || null,
+      user_agent: data.user_agent || null,
+      is_active: true,
+    })
 
     // Store token in memory with expiration
     const expiresIn = 24 * 60 * 60 * 1000 // 24 hours
@@ -50,9 +45,9 @@ export class SessionManager {
     return { session_id: id, token }
   }
 
-  getSession(id: string): Session | null {
-    const stmt = this.db.prepare('SELECT * FROM sessions WHERE id = ?')
-    const row = stmt.get(id) as any
+  async getSession(id: string): Promise<Session | null> {
+    const db = await getDatabase()
+    const row = await db.collection('sessions').findOne({ id }) as any
     if (!row) return null
 
     return {
@@ -76,20 +71,23 @@ export class SessionManager {
     return true
   }
 
-  updateLastActivity(id: string): void {
+  async updateLastActivity(id: string): Promise<void> {
+    const db = await getDatabase()
     const now = new Date().toISOString()
-    const stmt = this.db.prepare('UPDATE sessions SET last_activity = ? WHERE id = ?')
-    stmt.run(now, id)
+    await db.collection('sessions').updateOne({ id }, { $set: { last_activity: now } })
   }
 
-  endSession(id: string): void {
-    const stmt = this.db.prepare('UPDATE sessions SET is_active = 0 WHERE id = ?')
-    stmt.run(id)
+  async endSession(id: string): Promise<void> {
+    const db = await getDatabase()
+    await db.collection('sessions').updateOne({ id }, { $set: { is_active: false } })
   }
 
-  getActiveSessions(): Session[] {
-    const stmt = this.db.prepare('SELECT * FROM sessions WHERE is_active = 1 ORDER BY last_activity DESC')
-    const rows = stmt.all() as any[]
+  async getActiveSessions(): Promise<Session[]> {
+    const db = await getDatabase()
+    const rows = await db.collection('sessions')
+      .find({ is_active: true })
+      .sort({ last_activity: -1 })
+      .toArray() as any[]
     return rows.map(row => ({
       id: row.id,
       username: row.username,
@@ -101,9 +99,12 @@ export class SessionManager {
     }))
   }
 
-  getUserSessions(username: string): Session[] {
-    const stmt = this.db.prepare('SELECT * FROM sessions WHERE username = ? ORDER BY last_activity DESC')
-    const rows = stmt.all(username) as any[]
+  async getUserSessions(username: string): Promise<Session[]> {
+    const db = await getDatabase()
+    const rows = await db.collection('sessions')
+      .find({ username })
+      .sort({ last_activity: -1 })
+      .toArray() as any[]
     return rows.map(row => ({
       id: row.id,
       username: row.username,
@@ -115,7 +116,7 @@ export class SessionManager {
     }))
   }
 
-  cleanupExpiredSessions(): void {
+  async cleanupExpiredSessions(): Promise<void> {
     // Clean memory sessions
     const now = Date.now()
     for (const [token, session] of this.sessions.entries()) {
@@ -125,22 +126,26 @@ export class SessionManager {
     }
 
     // Clean database sessions older than 7 days
+    const db = await getDatabase()
     const date = new Date()
     date.setDate(date.getDate() - 7)
     const timestamp = date.toISOString()
 
-    const stmt = this.db.prepare('DELETE FROM sessions WHERE last_activity < ? AND is_active = 0')
-    stmt.run(timestamp)
+    await db.collection('sessions').deleteMany({
+      last_activity: { $lt: timestamp },
+      is_active: false,
+    })
   }
 
-  getSessionStats() {
-    const active = this.db.prepare('SELECT COUNT(*) as count FROM sessions WHERE is_active = 1').get() as { count: number }
-    const total = this.db.prepare('SELECT COUNT(*) as count FROM sessions').get() as { count: number }
+  async getSessionStats() {
+    const db = await getDatabase()
+    const active = await db.collection('sessions').countDocuments({ is_active: true })
+    const total = await db.collection('sessions').countDocuments()
 
     return {
-      activeSessions: active.count,
-      totalSessions: total.count,
-      inactiveSessions: total.count - active.count,
+      activeSessions: active,
+      totalSessions: total,
+      inactiveSessions: total - active,
     }
   }
 }

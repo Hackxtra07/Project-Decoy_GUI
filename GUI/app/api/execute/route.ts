@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify command exists
-    const command = getCommand(commandId)
+    const command = await getCommand(commandId)
     if (!command) {
       return NextResponse.json(
         { error: 'Command not found' },

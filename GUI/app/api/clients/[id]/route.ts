@@ -14,21 +14,21 @@ export async function GET(
     const action = searchParams.get('action')
 
     if (action === 'commands') {
-      const commands = getCommandHistory(id)
+      const commands = await getCommandHistory(id)
       return NextResponse.json(commands)
     }
 
     if (action === 'metrics') {
-      const metrics = getClientLatestMetrics(id)
+      const metrics = await getClientLatestMetrics(id)
       return NextResponse.json(metrics)
     }
 
     if (action === 'credentials') {
-      const credentials = getClientCredentials(id)
+      const credentials = await getClientCredentials(id)
       return NextResponse.json(credentials)
     }
 
-    const client = getClient(id)
+    const client = await getClient(id)
     if (!client) {
       return NextResponse.json(
         { error: 'Client not found' },
@@ -55,7 +55,7 @@ export async function PATCH(
     const body = await request.json()
 
     if (body.status) {
-      const client = updateClientStatus(id, body.status)
+      const client = await updateClientStatus(id, body.status)
       if (!client) {
         return NextResponse.json(
           { error: 'Client not found' },
@@ -84,7 +84,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params
-    const success = deleteClient(id)
+    const success = await deleteClient(id)
 
     if (!success) {
       return NextResponse.json(

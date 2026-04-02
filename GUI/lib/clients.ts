@@ -24,120 +24,117 @@ export interface CreateClientInput {
   is_admin?: boolean
 }
 
-export function registerClient(input: CreateClientInput): Client {
-  const db = getDatabase()
+export async function registerClient(input: CreateClientInput): Promise<Client> {
+  const db = await getDatabase()
   const id = uuidv4()
   const now = new Date().toISOString()
 
-  const stmt = db.prepare(`
-    INSERT INTO clients (id, hostname, username, os, ip_address, architecture, is_admin, status, last_seen, first_seen, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'online', ?, ?, ?)
-  `)
-
-  stmt.run(
+  const client: Client = {
     id,
-    input.hostname,
-    input.username,
-    input.os,
-    input.ip_address,
-    input.architecture || 'unknown',
-    input.is_admin ? 1 : 0,
-    now,
-    now,
-    now
-  )
+    hostname: input.hostname,
+    username: input.username,
+    os: input.os,
+    ip_address: input.ip_address,
+    architecture: input.architecture || 'unknown',
+    is_admin: !!input.is_admin,
+    status: 'online',
+    last_seen: now,
+    first_seen: now,
+    created_at: now,
+  }
 
-  return getClient(id)!
+  await db.collection('clients').insertOne(client)
+  return client
 }
 
-export function getClient(id: string): Client | null {
-  const db = getDatabase()
-  const stmt = db.prepare('SELECT * FROM clients WHERE id = ?')
-  const row = stmt.get(id) as any
+export async function getClient(id: string): Promise<Client | null> {
+  const db = await getDatabase()
+  const row = await db.collection('clients').findOne({ id }) as any
   
   if (!row) return null
-  
   return formatClient(row)
 }
 
-export function getAllClients(): Client[] {
-  const db = getDatabase()
-  const stmt = db.prepare('SELECT * FROM clients ORDER BY last_seen DESC')
-  const rows = stmt.all() as any[]
+export async function getAllClients(): Promise<Client[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('clients').find().sort({ last_seen: -1 }).toArray() as any[]
   
   return rows.map(formatClient)
 }
 
-export function getOnlineClients(): Client[] {
-  const db = getDatabase()
-  const stmt = db.prepare("SELECT * FROM clients WHERE status = 'online' ORDER BY last_seen DESC")
-  const rows = stmt.all() as any[]
+export async function getOnlineClients(): Promise<Client[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('clients')
+    .find({ status: 'online' })
+    .sort({ last_seen: -1 })
+    .toArray() as any[]
   
   return rows.map(formatClient)
 }
 
-export function updateClientStatus(id: string, status: 'online' | 'offline' | 'idle'): Client | null {
-  const db = getDatabase()
+export async function updateClientStatus(id: string, status: 'online' | 'offline' | 'idle'): Promise<Client | null> {
+  const db = await getDatabase()
   const now = new Date().toISOString()
   
-  const stmt = db.prepare('UPDATE clients SET status = ?, last_seen = ? WHERE id = ?')
-  stmt.run(status, now, id)
+  await db.collection('clients').updateOne(
+    { id },
+    { $set: { status, last_seen: now } }
+  )
   
   return getClient(id)
 }
 
-export function updateClientLastSeen(id: string): void {
-  const db = getDatabase()
+export async function updateClientLastSeen(id: string): Promise<void> {
+  const db = await getDatabase()
   const now = new Date().toISOString()
   
-  const stmt = db.prepare('UPDATE clients SET last_seen = ? WHERE id = ?')
-  stmt.run(now, id)
+  await db.collection('clients').updateOne(
+    { id },
+    { $set: { last_seen: now } }
+  )
 }
 
-export function deleteClient(id: string): boolean {
-  const db = getDatabase()
+export async function deleteClient(id: string): Promise<boolean> {
+  const db = await getDatabase()
   
-  // Delete related records first
-  db.prepare('DELETE FROM commands WHERE client_id = ?').run(id)
-  db.prepare('DELETE FROM system_info WHERE client_id = ?').run(id)
-  db.prepare('DELETE FROM files WHERE client_id = ?').run(id)
-  db.prepare('DELETE FROM command_history WHERE client_id = ?').run(id)
-  db.prepare('DELETE FROM credentials WHERE client_id = ?').run(id)
+  // Delete related records
+  await db.collection('commands').deleteMany({ client_id: id })
+  await db.collection('system_info').deleteMany({ client_id: id })
+  await db.collection('files').deleteMany({ client_id: id })
+  await db.collection('command_history').deleteMany({ client_id: id })
+  await db.collection('credentials').deleteMany({ client_id: id })
   
   // Delete the client
-  const stmt = db.prepare('DELETE FROM clients WHERE id = ?')
-  const result = stmt.run(id)
-  
-  return (result.changes ?? 0) > 0
+  const result = await db.collection('clients').deleteOne({ id })
+  return (result.deletedCount ?? 0) > 0
 }
 
-export function searchClients(query: string): Client[] {
-  const db = getDatabase()
-  const searchTerm = `%${query}%`
+export async function searchClients(query: string): Promise<Client[]> {
+  const db = await getDatabase()
+  const regex = new RegExp(query, 'i')
   
-  const stmt = db.prepare(`
-    SELECT * FROM clients 
-    WHERE hostname LIKE ? 
-      OR username LIKE ? 
-      OR ip_address LIKE ? 
-      OR os LIKE ?
-    ORDER BY last_seen DESC
-  `)
+  const rows = await db.collection('clients').find({
+    $or: [
+      { hostname: regex },
+      { username: regex },
+      { ip_address: regex },
+      { os: regex }
+    ]
+  }).sort({ last_seen: -1 }).toArray() as any[]
   
-  const rows = stmt.all(searchTerm, searchTerm, searchTerm, searchTerm) as any[]
   return rows.map(formatClient)
 }
 
-export function getClientStats(): {
+export async function getClientStats(): Promise<{
   total: number
   online: number
   offline: number
-} {
-  const db = getDatabase()
+}> {
+  const db = await getDatabase()
   
-  const total = (db.prepare('SELECT COUNT(*) as count FROM clients').get() as any).count
-  const online = (db.prepare("SELECT COUNT(*) as count FROM clients WHERE status = 'online'").get() as any).count
-  const offline = (db.prepare("SELECT COUNT(*) as count FROM clients WHERE status = 'offline'").get() as any).count
+  const total = await db.collection('clients').countDocuments()
+  const online = await db.collection('clients').countDocuments({ status: 'online' })
+  const offline = await db.collection('clients').countDocuments({ status: 'offline' })
   
   return { total, online, offline }
 }

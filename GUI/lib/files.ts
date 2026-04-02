@@ -26,144 +26,120 @@ export interface CreateFileInput {
   local_path?: string
 }
 
-export function createFileRecord(input: CreateFileInput): FileRecord {
-  const db = getDatabase()
+export async function createFileRecord(input: CreateFileInput): Promise<FileRecord> {
+  const db = await getDatabase()
   const id = uuidv4()
   const now = new Date().toISOString()
 
-  const stmt = db.prepare(`
-    INSERT INTO files 
-    (id, client_id, command_id, file_path, file_name, file_size, file_type, operation, status, local_path, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-  `)
-
-  stmt.run(
+  const file: FileRecord = {
     id,
-    input.client_id,
-    input.command_id || null,
-    input.file_path,
-    input.file_name,
-    input.file_size || null,
-    input.file_type || null,
-    input.operation,
-    input.local_path || null,
-    now
-  )
+    client_id: input.client_id,
+    command_id: input.command_id || undefined,
+    file_path: input.file_path,
+    file_name: input.file_name,
+    file_size: input.file_size || undefined,
+    file_type: input.file_type || undefined,
+    operation: input.operation,
+    status: 'pending',
+    local_path: input.local_path || undefined,
+    created_at: now
+  }
 
-  return getFileRecord(id)!
+  await db.collection('files').insertOne(file)
+  return file
 }
 
-export function getFileRecord(id: string): FileRecord | null {
-  const db = getDatabase()
-  const stmt = db.prepare('SELECT * FROM files WHERE id = ?')
-  const row = stmt.get(id) as any
+export async function getFileRecord(id: string): Promise<FileRecord | null> {
+  const db = await getDatabase()
+  const row = await db.collection('files').findOne({ id }) as any
   
   if (!row) return null
-  
   return formatFileRecord(row)
 }
 
-export function getClientFiles(clientId: string, limit = 100): FileRecord[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM files 
-    WHERE client_id = ? 
-    ORDER BY created_at DESC 
-    LIMIT ?
-  `)
+export async function getClientFiles(clientId: string, limit = 100): Promise<FileRecord[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('files')
+    .find({ client_id: clientId })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId, limit) as any[]
   return rows.map(formatFileRecord)
 }
 
-export function getCommandFiles(commandId: string): FileRecord[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM files 
-    WHERE command_id = ? 
-    ORDER BY created_at DESC
-  `)
+export async function getCommandFiles(commandId: string): Promise<FileRecord[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('files')
+    .find({ command_id: commandId })
+    .sort({ created_at: -1 })
+    .toArray() as any[]
   
-  const rows = stmt.all(commandId) as any[]
   return rows.map(formatFileRecord)
 }
 
-export function updateFileStatus(
+export async function updateFileStatus(
   id: string,
   status: 'pending' | 'in_progress' | 'completed' | 'failed',
   localPath?: string
-): FileRecord | null {
-  const db = getDatabase()
+): Promise<FileRecord | null> {
+  const db = await getDatabase()
 
-  const updates = ['status = ?']
-  const params: any[] = [status]
-
+  const updateFields: any = { status }
   if (localPath) {
-    updates.push('local_path = ?')
-    params.push(localPath)
+    updateFields.local_path = localPath
   }
 
-  params.push(id)
-
-  const stmt = db.prepare(`
-    UPDATE files 
-    SET ${updates.join(', ')}
-    WHERE id = ?
-  `)
-
-  stmt.run(...params)
+  await db.collection('files').updateOne(
+    { id },
+    { $set: updateFields }
+  )
 
   return getFileRecord(id)
 }
 
-export function deleteFileRecord(id: string): boolean {
-  const db = getDatabase()
-  const stmt = db.prepare('DELETE FROM files WHERE id = ?')
-  const result = stmt.run(id)
-  
-  return (result.changes ?? 0) > 0
+export async function deleteFileRecord(id: string): Promise<boolean> {
+  const db = await getDatabase()
+  const result = await db.collection('files').deleteOne({ id })
+  return (result.deletedCount ?? 0) > 0
 }
 
-export function getDownloads(clientId: string, limit = 50): FileRecord[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM files 
-    WHERE client_id = ? AND operation = 'download'
-    ORDER BY created_at DESC 
-    LIMIT ?
-  `)
+export async function getDownloads(clientId: string, limit = 50): Promise<FileRecord[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('files')
+    .find({ client_id: clientId, operation: 'download' })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId, limit) as any[]
   return rows.map(formatFileRecord)
 }
 
-export function getUploads(clientId: string, limit = 50): FileRecord[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM files 
-    WHERE client_id = ? AND operation = 'upload'
-    ORDER BY created_at DESC 
-    LIMIT ?
-  `)
+export async function getUploads(clientId: string, limit = 50): Promise<FileRecord[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('files')
+    .find({ client_id: clientId, operation: 'upload' })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId, limit) as any[]
   return rows.map(formatFileRecord)
 }
 
-export function getFileStats(clientId: string): {
+export async function getFileStats(clientId: string): Promise<{
   total_downloads: number
   total_uploads: number
   completed: number
   failed: number
   pending: number
-} {
-  const db = getDatabase()
+}> {
+  const db = await getDatabase()
   
-  const downloads = (db.prepare("SELECT COUNT(*) as count FROM files WHERE client_id = ? AND operation = 'download'").get(clientId) as any).count
-  const uploads = (db.prepare("SELECT COUNT(*) as count FROM files WHERE client_id = ? AND operation = 'upload'").get(clientId) as any).count
-  const completed = (db.prepare("SELECT COUNT(*) as count FROM files WHERE client_id = ? AND status = 'completed'").get(clientId) as any).count
-  const failed = (db.prepare("SELECT COUNT(*) as count FROM files WHERE client_id = ? AND status = 'failed'").get(clientId) as any).count
-  const pending = (db.prepare("SELECT COUNT(*) as count FROM files WHERE client_id = ? AND status = 'pending'").get(clientId) as any).count
+  const downloads = await db.collection('files').countDocuments({ client_id: clientId, operation: 'download' })
+  const uploads = await db.collection('files').countDocuments({ client_id: clientId, operation: 'upload' })
+  const completed = await db.collection('files').countDocuments({ client_id: clientId, status: 'completed' })
+  const failed = await db.collection('files').countDocuments({ client_id: clientId, status: 'failed' })
+  const pending = await db.collection('files').countDocuments({ client_id: clientId, status: 'pending' })
   
   return {
     total_downloads: downloads,
@@ -174,30 +150,31 @@ export function getFileStats(clientId: string): {
   }
 }
 
-export function searchFiles(clientId: string, query: string, limit = 50): FileRecord[] {
-  const db = getDatabase()
-  const searchTerm = `%${query}%`
+export async function searchFiles(clientId: string, query: string, limit = 50): Promise<FileRecord[]> {
+  const db = await getDatabase()
+  const regex = new RegExp(query, 'i')
+
+  const rows = await db.collection('files')
+    .find({ 
+      client_id: clientId, 
+      $or: [{ file_name: regex }, { file_path: regex }] 
+    })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray() as any[]
   
-  const stmt = db.prepare(`
-    SELECT * FROM files 
-    WHERE client_id = ? AND (file_name LIKE ? OR file_path LIKE ?)
-    ORDER BY created_at DESC 
-    LIMIT ?
-  `)
-  
-  const rows = stmt.all(clientId, searchTerm, searchTerm, limit) as any[]
   return rows.map(formatFileRecord)
 }
 
-export function deleteOldFiles(daysOld = 30): number {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    DELETE FROM files 
-    WHERE created_at < datetime('now', '-' || ? || ' days')
-  `)
-  
-  const result = stmt.run(daysOld)
-  return result.changes ?? 0
+export async function deleteOldFiles(daysOld = 30): Promise<number> {
+  const db = await getDatabase()
+  const dateLimit = new Date();
+  dateLimit.setDate(dateLimit.getDate() - daysOld);
+
+  const result = await db.collection('files').deleteMany({
+    created_at: { $lt: dateLimit.toISOString() }
+  })
+  return result.deletedCount ?? 0
 }
 
 function formatFileRecord(row: any): FileRecord {

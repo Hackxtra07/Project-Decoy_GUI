@@ -17,9 +17,7 @@ export interface SystemMetrics {
 }
 
 export class SystemMonitor {
-  private db = getDatabase()
-
-  recordMetrics(data: {
+  async recordMetrics(data: {
     client_id: string
     cpu_usage: number
     memory_usage: number
@@ -30,179 +28,128 @@ export class SystemMonitor {
     running_processes?: string[]
     network_connections?: Record<string, any>
     uptime?: number
-  }): SystemMetrics {
+  }): Promise<SystemMetrics> {
+    const db = await getDatabase()
     const now = new Date().toISOString()
 
-    const stmt = this.db.prepare(`
-      INSERT INTO system_info (
-        client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total,
-        network_interfaces, running_processes, network_connections, uptime, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-
-    stmt.run(
-      data.client_id,
-      data.cpu_usage,
-      data.memory_usage,
-      data.memory_total,
-      data.disk_usage,
-      data.disk_total,
-      JSON.stringify(data.network_interfaces || {}),
-      JSON.stringify(data.running_processes || []),
-      JSON.stringify(data.network_connections || {}),
-      data.uptime || 0,
-      now
-    )
-
-    return {
+    const metrics: any = {
       client_id: data.client_id,
       cpu_usage: data.cpu_usage,
       memory_usage: data.memory_usage,
       memory_total: data.memory_total,
       disk_usage: data.disk_usage,
       disk_total: data.disk_total,
-      network_interfaces: JSON.stringify(data.network_interfaces || {}),
-      running_processes: JSON.stringify(data.running_processes || []),
-      network_connections: JSON.stringify(data.network_connections || {}),
-      uptime: data.uptime,
-      timestamp: now,
+      network_interfaces: data.network_interfaces || {},
+      running_processes: data.running_processes || [],
+      network_connections: data.network_connections || {},
+      uptime: data.uptime || 0,
+      timestamp: now
     }
+
+    await db.collection('system_info').insertOne(metrics)
+    return metrics
   }
 
-  getClientMetrics(client_id: string, limit = 100): SystemMetrics[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM system_info WHERE client_id = ? ORDER BY timestamp DESC LIMIT ?
-    `)
-    const rows = stmt.all(client_id, limit) as any[]
-    return rows.map(row => ({
-      ...row,
-      network_interfaces: typeof row.network_interfaces === 'string' ? JSON.parse(row.network_interfaces) : row.network_interfaces,
-      running_processes: typeof row.running_processes === 'string' ? JSON.parse(row.running_processes) : row.running_processes,
-      network_connections: typeof row.network_connections === 'string' ? JSON.parse(row.network_connections) : row.network_connections,
-    }))
+  async getClientMetrics(client_id: string, limit = 100): Promise<SystemMetrics[]> {
+    const db = await getDatabase()
+    const rows = await db.collection('system_info')
+      .find({ client_id })
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .toArray() as any[]
+    return rows as SystemMetrics[]
   }
 
-  getLatestMetrics(client_id: string): SystemMetrics | null {
-    const stmt = this.db.prepare(`
-      SELECT * FROM system_info WHERE client_id = ? ORDER BY timestamp DESC LIMIT 1
-    `)
-    const row = stmt.get(client_id) as any
-    if (!row) return null
+  async getLatestMetrics(client_id: string): Promise<SystemMetrics | null> {
+    const db = await getDatabase()
+    const row = await db.collection('system_info')
+      .find({ client_id })
+      .sort({ timestamp: -1 })
+      .limit(1)
+      .next() as any
+    return row as SystemMetrics | null
+  }
 
-    return {
-      ...row,
-      network_interfaces: typeof row.network_interfaces === 'string' ? JSON.parse(row.network_interfaces) : row.network_interfaces,
-      running_processes: typeof row.running_processes === 'string' ? JSON.parse(row.running_processes) : row.running_processes,
-      network_connections: typeof row.network_connections === 'string' ? JSON.parse(row.network_connections) : row.network_connections,
+  async getAllLatestMetrics(): Promise<Map<string, SystemMetrics>> {
+    const db = await getDatabase()
+    const metricsMap = new Map<string, SystemMetrics>()
+    
+    const rows = await db.collection('system_info').aggregate([
+      { $sort: { timestamp: -1 } },
+      { $group: { _id: "$client_id", latest: { $first: "$$ROOT" } } }
+    ]).toArray()
+
+    for (const row of rows) {
+      metricsMap.set(row._id, row.latest)
     }
+    return metricsMap
   }
 
-  getAllLatestMetrics(): Map<string, SystemMetrics> {
-    const stmt = this.db.prepare(`
-      SELECT DISTINCT ON (client_id) * FROM system_info ORDER BY client_id, timestamp DESC
-    `)
-
-    try {
-      const rows = stmt.all() as any[]
-      const metricsMap = new Map<string, SystemMetrics>()
-
-      for (const row of rows) {
-        metricsMap.set(row.client_id, {
-          ...row,
-          network_interfaces: typeof row.network_interfaces === 'string' ? JSON.parse(row.network_interfaces) : row.network_interfaces,
-          running_processes: typeof row.running_processes === 'string' ? JSON.parse(row.running_processes) : row.running_processes,
-          network_connections: typeof row.network_connections === 'string' ? JSON.parse(row.network_connections) : row.network_connections,
-        })
-      }
-      return metricsMap
-    } catch (e) {
-      // SQLite doesn't support DISTINCT ON, use alternative approach
-      const allRows = this.db.prepare('SELECT * FROM system_info ORDER BY timestamp DESC').all() as any[]
-      const metricsMap = new Map<string, SystemMetrics>()
-
-      for (const row of allRows) {
-        if (!metricsMap.has(row.client_id)) {
-          metricsMap.set(row.client_id, {
-            ...row,
-            network_interfaces: typeof row.network_interfaces === 'string' ? JSON.parse(row.network_interfaces) : row.network_interfaces,
-            running_processes: typeof row.running_processes === 'string' ? JSON.parse(row.running_processes) : row.running_processes,
-            network_connections: typeof row.network_connections === 'string' ? JSON.parse(row.network_connections) : row.network_connections,
-          })
-        }
-      }
-      return metricsMap
-    }
-  }
-
-  getMetricsTimeseries(client_id: string, hours = 24, limit = 0): SystemMetrics[] {
+  async getMetricsTimeseries(client_id: string, hours = 24, limit = 0): Promise<SystemMetrics[]> {
+    const db = await getDatabase()
     let rows: any[] = []
     
     if (limit > 0) {
-      // If limit is specified, ignore hours and just get the last N records
-      const stmt = this.db.prepare(`
-        SELECT * FROM system_info 
-        WHERE client_id = ? 
-        ORDER BY timestamp DESC 
-        LIMIT ?
-      `)
-      rows = stmt.all(client_id, limit) as any[]
-      // Reverse to get chronological order for charts
+      rows = await db.collection('system_info')
+        .find({ client_id })
+        .sort({ timestamp: -1 })
+        .limit(limit)
+        .toArray() as any[]
       rows.reverse()
     } else {
       const date = new Date()
       date.setHours(date.getHours() - hours)
       const timestamp = date.toISOString()
 
-      const stmt = this.db.prepare(`
-        SELECT * FROM system_info 
-        WHERE client_id = ? AND timestamp > ? 
-        ORDER BY timestamp ASC
-      `)
-      rows = stmt.all(client_id, timestamp) as any[]
+      rows = await db.collection('system_info')
+        .find({ client_id, timestamp: { $gt: timestamp } })
+        .sort({ timestamp: 1 })
+        .toArray() as any[]
     }
 
-    return rows.map(row => ({
-      ...row,
-      network_interfaces: typeof row.network_interfaces === 'string' ? JSON.parse(row.network_interfaces) : row.network_interfaces,
-      running_processes: typeof row.running_processes === 'string' ? JSON.parse(row.running_processes) : row.running_processes,
-      network_connections: typeof row.network_connections === 'string' ? JSON.parse(row.network_connections) : row.network_connections,
-    }))
+    return rows as SystemMetrics[]
   }
 
-  getAggregateMetrics(client_id: string, hours = 24) {
+  async getAggregateMetrics(client_id: string, hours = 24) {
+    const db = await getDatabase()
     const date = new Date()
     date.setHours(date.getHours() - hours)
     const timestamp = date.toISOString()
 
-    const stmt = this.db.prepare(`
-      SELECT
-        AVG(cpu_usage) as avg_cpu,
-        MAX(cpu_usage) as max_cpu,
-        AVG(memory_usage) as avg_memory,
-        MAX(memory_usage) as max_memory,
-        AVG(disk_usage) as avg_disk,
-        MAX(disk_usage) as max_disk
-      FROM system_info
-      WHERE client_id = ? AND timestamp > ?
-    `)
+    const stats = await db.collection('system_info').aggregate([
+      { $match: { client_id, timestamp: { $gt: timestamp } } },
+      {
+        $group: {
+          _id: null,
+          avg_cpu: { $avg: "$cpu_usage" },
+          max_cpu: { $max: "$cpu_usage" },
+          avg_memory: { $avg: "$memory_usage" },
+          max_memory: { $max: "$memory_usage" },
+          avg_disk: { $avg: "$disk_usage" },
+          max_disk: { $max: "$disk_usage" }
+        }
+      }
+    ]).next() as any
 
-    return stmt.get(client_id, timestamp) as {
-      avg_cpu: number
-      max_cpu: number
-      avg_memory: number
-      max_memory: number
-      avg_disk: number
-      max_disk: number
-    } | null
+    if (!stats) return null
+
+    return {
+      avg_cpu: stats.avg_cpu,
+      max_cpu: stats.max_cpu,
+      avg_memory: stats.avg_memory,
+      max_memory: stats.max_memory,
+      avg_disk: stats.avg_disk,
+      max_disk: stats.max_disk,
+    }
   }
 
-  clearOldMetrics(days = 30): void {
+  async clearOldMetrics(days = 30): Promise<void> {
+    const db = await getDatabase()
     const date = new Date()
     date.setDate(date.getDate() - days)
     const timestamp = date.toISOString()
 
-    const stmt = this.db.prepare('DELETE FROM system_info WHERE timestamp < ?')
-    stmt.run(timestamp)
+    await db.collection('system_info').deleteMany({ timestamp: { $lt: timestamp } })
   }
 }
 

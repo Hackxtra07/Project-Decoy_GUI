@@ -16,16 +16,16 @@ export async function GET(request: NextRequest) {
     }
 
     if (action === 'stats') {
-      const stats = getFileStats(clientId)
+      const stats = await getFileStats(clientId)
       return NextResponse.json(stats)
     }
 
     if (action === 'search' && query) {
-      const results = searchFiles(clientId, query)
+      const results = await searchFiles(clientId, query)
       return NextResponse.json(results)
     }
 
-    const files = getClientFiles(clientId)
+    const files = await getClientFiles(clientId)
     return NextResponse.json(files)
   } catch (error) {
     console.error('[Files API] Error:', error)
@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
 
-    const file = createFileRecord({
+    const file = await createFileRecord({
       client_id: body.client_id,
       command_id: body.command_id,
       file_path: body.file_path,

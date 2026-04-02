@@ -22,151 +22,137 @@ export interface CreateCommandInput {
   parameters?: Record<string, any>
 }
 
-export function createCommand(input: CreateCommandInput): Command {
-  const db = getDatabase()
+export async function createCommand(input: CreateCommandInput): Promise<Command> {
+  const db = await getDatabase()
   const id = uuidv4()
   const now = new Date().toISOString()
 
-  const stmt = db.prepare(`
-    INSERT INTO commands (id, client_id, command_type, command_name, parameters, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-  `)
-
-  stmt.run(
+  const command: Command = {
     id,
-    input.client_id,
-    input.command_type,
-    input.command_name,
-    input.parameters ? JSON.stringify(input.parameters) : null,
-    now,
-    now
-  )
+    client_id: input.client_id,
+    command_type: input.command_type,
+    command_name: input.command_name,
+    parameters: input.parameters || {},
+    status: 'pending',
+    created_at: now,
+    updated_at: now,
+  }
 
-  return getCommand(id)!
+  await db.collection('commands').insertOne(command)
+  return command
 }
 
-export function getCommand(id: string): Command | null {
-  const db = getDatabase()
-  const stmt = db.prepare('SELECT * FROM commands WHERE id = ?')
-  const row = stmt.get(id) as any
+export async function getCommand(id: string): Promise<Command | null> {
+  const db = await getDatabase()
+  const row = await db.collection('commands').findOne({ id }) as any
   
   if (!row) return null
-  
   return formatCommand(row)
 }
 
-export function getClientCommands(clientId: string, limit = 50): Command[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM commands 
-    WHERE client_id = ? 
-    ORDER BY created_at DESC 
-    LIMIT ?
-  `)
+export async function getClientCommands(clientId: string, limit = 50): Promise<Command[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('commands')
+    .find({ client_id: clientId })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId, limit) as any[]
   return rows.map(formatCommand)
 }
 
-export function getPendingCommands(clientId: string): Command[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM commands 
-    WHERE client_id = ? AND status = 'pending'
-    ORDER BY created_at ASC
-  `)
+export async function getPendingCommands(clientId: string): Promise<Command[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('commands')
+    .find({ client_id: clientId, status: 'pending' })
+    .sort({ created_at: 1 })
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId) as any[]
   return rows.map(formatCommand)
 }
 
-export function updateCommandStatus(
+export async function updateCommandStatus(
   id: string,
   status: 'pending' | 'executing' | 'completed' | 'failed',
   result?: string,
   errorMessage?: string
-): Command | null {
-  const db = getDatabase()
+): Promise<Command | null> {
+  const db = await getDatabase()
   const now = new Date().toISOString()
 
-  const stmt = db.prepare(`
-    UPDATE commands 
-    SET status = ?, result = ?, error_message = ?, updated_at = ?, execution_time = ?
-    WHERE id = ?
-  `)
-
-  stmt.run(
+  const updateFields: any = {
     status,
-    result || null,
-    errorMessage || null,
-    now,
-    status === 'completed' || status === 'failed' ? now : null,
-    id
+    updated_at: now,
+    result: result || null,
+    error_message: errorMessage || null
+  }
+
+  if (status === 'completed' || status === 'failed') {
+    updateFields.execution_time = now
+  }
+
+  await db.collection('commands').updateOne(
+    { id },
+    { $set: updateFields }
   )
 
   return getCommand(id)
 }
 
-export function getCommandHistory(clientId: string, limit = 100): Command[] {
-  const db = getDatabase()
-  const stmt = db.prepare(`
-    SELECT * FROM commands 
-    WHERE client_id = ? 
-    ORDER BY created_at DESC 
-    LIMIT ?
-  `)
+export async function getCommandHistory(clientId: string, limit = 100): Promise<Command[]> {
+  const db = await getDatabase()
+  const rows = await db.collection('commands')
+    .find({ client_id: clientId })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray() as any[]
   
-  const rows = stmt.all(clientId, limit) as any[]
   return rows.map(formatCommand)
 }
 
-export function deleteCommand(id: string): boolean {
-  const db = getDatabase()
-  const stmt = db.prepare('DELETE FROM commands WHERE id = ?')
-  const result = stmt.run(id)
-  
-  return (result.changes ?? 0) > 0
+export async function deleteCommand(id: string): Promise<boolean> {
+  const db = await getDatabase()
+  const result = await db.collection('commands').deleteOne({ id })
+  return (result.deletedCount ?? 0) > 0
 }
 
-export function getExecutionStats(): {
+export async function getExecutionStats(): Promise<{
   total: number
   pending: number
   executing: number
   completed: number
   failed: number
-} {
-  const db = getDatabase()
+}> {
+  const db = await getDatabase()
   
-  const total = (db.prepare('SELECT COUNT(*) as count FROM commands').get() as any).count
-  const pending = (db.prepare("SELECT COUNT(*) as count FROM commands WHERE status = 'pending'").get() as any).count
-  const executing = (db.prepare("SELECT COUNT(*) as count FROM commands WHERE status = 'executing'").get() as any).count
-  const completed = (db.prepare("SELECT COUNT(*) as count FROM commands WHERE status = 'completed'").get() as any).count
-  const failed = (db.prepare("SELECT COUNT(*) as count FROM commands WHERE status = 'failed'").get() as any).count
+  const total = await db.collection('commands').countDocuments()
+  const pending = await db.collection('commands').countDocuments({ status: 'pending' })
+  const executing = await db.collection('commands').countDocuments({ status: 'executing' })
+  const completed = await db.collection('commands').countDocuments({ status: 'completed' })
+  const failed = await db.collection('commands').countDocuments({ status: 'failed' })
   
   return { total, pending, executing, completed, failed }
 }
 
-export function archiveCommandHistory(clientId: string, daysOld = 30): number {
-  const db = getDatabase()
+export async function archiveCommandHistory(clientId: string, daysOld = 30): Promise<number> {
+  const db = await getDatabase()
+  const dateLimit = new Date()
+  dateLimit.setDate(dateLimit.getDate() - daysOld)
   
-  // Insert completed commands into history before archiving
-  const archive = db.prepare(`
-    INSERT INTO command_history (id, client_id, command_type, command_name, parameters, result, executed_at)
-    SELECT id, client_id, command_type, command_name, parameters, result, created_at
-    FROM commands
-    WHERE client_id = ? AND status = 'completed' AND created_at < datetime('now', '-' || ? || ' days')
-  `)
+  const query = {
+    client_id: clientId,
+    created_at: { $lt: dateLimit.toISOString() }
+  }
+
+  // In MongoDB we can just move them to another collection or delete
+  const oldCommands = await db.collection('commands').find(query).toArray()
+  if (oldCommands.length > 0) {
+    await db.collection('command_history').insertMany(oldCommands)
+    const result = await db.collection('commands').deleteMany(query)
+    return result.deletedCount ?? 0
+  }
   
-  archive.run(clientId, daysOld)
-  
-  // Delete old commands
-  const deleteStmt = db.prepare(`
-    DELETE FROM commands
-    WHERE client_id = ? AND created_at < datetime('now', '-' || ? || ' days')
-  `)
-  
-  const result = deleteStmt.run(clientId, daysOld)
-  return result.changes ?? 0
+  return 0
 }
 
 function formatCommand(row: any): Command {
@@ -175,7 +161,7 @@ function formatCommand(row: any): Command {
     client_id: row.client_id,
     command_type: row.command_type,
     command_name: row.command_name,
-    parameters: row.parameters ? JSON.parse(row.parameters) : undefined,
+    parameters: row.parameters,
     status: row.status,
     result: row.result,
     error_message: row.error_message,

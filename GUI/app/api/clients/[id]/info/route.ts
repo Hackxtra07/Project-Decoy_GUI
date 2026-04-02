@@ -11,7 +11,7 @@ export async function GET(
   try {
     const { id } = await params
 
-    const client = clientManager.getClient(id)
+    const client = await clientManager.getClient(id)
     if (!client) {
       return NextResponse.json(
         {
@@ -22,9 +22,9 @@ export async function GET(
       )
     }
 
-    const commands = commandQueue.getClientCommands(id, 20)
-    const metrics = systemMonitor.getLatestMetrics(id)
-    const files = fileOperations.getClientFiles(id, 10)
+    const commands = await commandQueue.getClientCommands(id, 20)
+    const metrics = await systemMonitor.getLatestMetrics(id)
+    const files = await fileOperations.getClientFiles(id, 10)
 
     return NextResponse.json({
       success: true,

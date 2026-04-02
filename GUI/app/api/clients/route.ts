@@ -10,21 +10,21 @@ export async function GET(request: NextRequest) {
     const query = searchParams.get('q')
 
     if (action === 'stats') {
-      const stats = getClientStats()
+      const stats = await getClientStats()
       return NextResponse.json(stats)
     }
 
     if (action === 'online') {
-      const clients = getOnlineClients()
+      const clients = await getOnlineClients()
       return NextResponse.json(clients)
     }
 
     if (action === 'search' && query) {
-      const results = searchClients(query)
+      const results = await searchClients(query)
       return NextResponse.json(results)
     }
 
-    const clients = getAllClients()
+    const clients = await getAllClients()
     return NextResponse.json(clients)
   } catch (error) {
     console.error('[Clients API] Error:', error)
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
 
-    const client = registerClient({
+    const client = await registerClient({
       hostname: body.hostname,
       username: body.username,
       os: body.os,

@@ -10,18 +10,18 @@ export async function GET(request: NextRequest) {
     const clientId = searchParams.get('clientId')
 
     if (action === 'stats') {
-      const stats = getExecutionStats()
+      const stats = await getExecutionStats()
       return NextResponse.json(stats)
     }
 
     if (action === 'pending' && clientId) {
-      const commands = getPendingCommands(clientId)
+      const commands = await getPendingCommands(clientId)
       return NextResponse.json(commands)
     }
 
     if (action === 'history' && clientId) {
       const { getClientCommands } = await import('@/lib/commands')
-      const commands = getClientCommands(clientId, 20)
+      const commands = await getClientCommands(clientId, 20)
       return NextResponse.json(commands)
     }
 
@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     console.log('[Commands API] Received request:', body)
 
-    const command = createCommand({
+    const command = await createCommand({
       client_id: body.client_id,
       command_type: body.command_type,
       command_name: body.command_name,

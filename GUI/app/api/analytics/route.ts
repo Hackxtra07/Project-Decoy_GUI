@@ -3,7 +3,7 @@ import { getAnalytics } from '@/lib/analytics'
 
 export async function GET(request: NextRequest) {
   try {
-    const data = getAnalytics()
+    const data = await getAnalytics()
     return NextResponse.json({ success: true, data })
   } catch (error) {
     console.error('[Analytics API] Error:', error)

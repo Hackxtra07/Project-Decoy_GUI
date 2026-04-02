@@ -610,7 +610,7 @@ export async function executeCommand(
     console.log(`[Executor] Command ${commandName} queued for client ${clientId}`)
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
-    updateCommandStatus(commandId, 'failed', undefined, errorMessage)
+    await updateCommandStatus(commandId, 'failed', undefined, errorMessage)
     console.error(`[Executor] Error queuing command ${commandName}:`, errorMessage)
   }
 }
