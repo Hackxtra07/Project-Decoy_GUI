@@ -104,110 +104,127 @@ export default function LootPanel() {
   const filteredFiles = files.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase()))
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-8 space-y-8 animate-in fade-in duration-700">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-foreground">Loot Explorer</h1>
-          <p className="text-muted-foreground">Browse and analyze data captured from remote systems</p>
+          <h1 className="text-4xl font-black text-foreground tracking-tighter mb-2 uppercase">Loot_Vault</h1>
+          <p className="text-xs font-mono text-primary/60 tracking-widest uppercase">Centralized Intelligence Repository</p>
         </div>
         <div className="flex gap-4">
-          <div className="relative w-64">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <div className="relative group">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
             <Input 
-              placeholder="Search loot..." 
-              className="pl-10" 
+              placeholder="FILTER_DATA..." 
+              className="pl-10 w-72 bg-white/[0.03] border-white/10 rounded-xl focus:ring-primary/20 focus:border-primary/50 font-mono text-xs" 
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
-          <Button variant="outline" onClick={() => fetchFiles(currentDir)}>Refresh</Button>
+          <Button variant="outline" className="rounded-xl border-white/10 hover:bg-white/5 active:scale-95 transition-all text-xs font-bold" onClick={() => fetchFiles(currentDir)}>
+            SYNC_NODE
+          </Button>
         </div>
       </div>
 
       {/* Stats Cards */}
       {stats && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-4 xl:grid-cols-5 gap-6">
           {Object.entries(stats).map(([cat, s]: [string, any]) => (
-            <Card key={cat} className={`bg-card/50 cursor-pointer transition-colors ${currentDir === cat ? 'ring-2 ring-primary' : 'hover:bg-card'}`} onClick={() => setCurrentDir(currentDir === cat ? '' : cat)}>
-              <CardContent className="pt-6">
-                <div className="flex items-center justify-between mb-2">
-                  <Badge variant={currentDir === cat ? 'default' : 'outline'} className="capitalize">{cat.replace('_', ' ')}</Badge>
-                  <Clock className="w-4 h-4 text-muted-foreground" />
+            <div key={cat} className={`glass-card p-6 rounded-2xl cursor-pointer transition-all relative group overflow-hidden border-l-2 ${currentDir === cat ? 'border-l-primary bg-primary/5' : 'border-l-white/10 hover:border-l-primary/50'}`} onClick={() => setCurrentDir(currentDir === cat ? '' : cat)}>
+              <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-30 transition-opacity">
+                <Clock className="w-5 h-5" />
+              </div>
+              <div className="flex flex-col gap-2 relative z-10">
+                <span className="text-[10px] font-black text-primary/40 uppercase tracking-[0.2em]">{cat.replace('_', ' ')}</span>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-3xl font-black neon-text">{s.count.toString().padStart(2, '0')}</span>
+                  <span className="text-[10px] text-muted-foreground font-mono uppercase">items</span>
                 </div>
-                <div className="mt-2">
-                  <span className="text-2xl font-bold">{s.count}</span>
-                  <span className="text-xs text-muted-foreground ml-2">files</span>
+                <div className="h-px w-full bg-white/5 my-1" />
+                <div className="text-[10px] font-mono text-muted-foreground/60 uppercase">
+                   ALLOCATED: {formatSize(s.size)}
                 </div>
-                <div className="text-xs text-muted-foreground mt-1">
-                  Total Size: {formatSize(s.size)}
-                </div>
-              </CardContent>
-            </Card>
+              </div>
+            </div>
           ))}
         </div>
       )}
 
       {/* File Explorer */}
-      <Card className="border-border">
-        <CardHeader className="flex flex-row items-center justify-between border-b pb-4">
-          <div className="flex items-center gap-2">
-            <CardTitle className="text-sm font-mono">{currentDir ? `Category: ${currentDir.replace('_', ' ')}` : 'All Collected Loot'}</CardTitle>
+      <div className="glass-card rounded-2xl border-white/5 overflow-hidden">
+        <div className="px-8 py-6 border-b border-white/5 flex items-center justify-between bg-white/[0.01]">
+          <div className="flex items-center gap-4">
+            <div className="w-2 h-2 rounded-full bg-primary animate-pulse shadow-[0_0_8px_rgba(0,240,255,1)]" />
+            <h2 className="text-xs font-black tracking-[0.3em] uppercase text-primary/80">
+              {currentDir ? `Filtered_Stream: ${currentDir}` : 'Global_Capture_Feed'}
+            </h2>
           </div>
-          <p className="text-xs text-muted-foreground">{filteredFiles.length} items</p>
-        </CardHeader>
-        <CardContent className="p-0">
-          <div className="max-h-[600px] overflow-y-auto">
-            {loading ? (
-              <div className="p-8 text-center text-muted-foreground">Loading file system...</div>
-            ) : filteredFiles.length === 0 ? (
-              <div className="p-8 text-center text-muted-foreground">No files found in this directory</div>
-            ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-muted/30 border-b">
-                    <th className="text-left py-2 px-4 font-medium text-muted-foreground">Name</th>
-                    <th className="text-left py-2 px-4 font-medium text-muted-foreground">Type</th>
-                    <th className="text-right py-2 px-4 font-medium text-muted-foreground">Size</th>
-                    <th className="text-right py-2 px-4 font-medium text-muted-foreground">Last Modified</th>
-                    <th className="text-right py-2 px-4 font-medium text-muted-foreground">Actions</th>
+          <div className="text-[10px] font-mono text-muted-foreground bg-white/5 px-3 py-1 rounded-full">
+            {filteredFiles.length} TOTAL_DETECTIONS
+          </div>
+        </div>
+        
+        <div className="max-h-[600px] overflow-y-auto custom-scrollbar">
+          {loading ? (
+            <div className="p-20 text-center flex flex-col items-center justify-center gap-4">
+               <div className="w-10 h-10 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
+               <p className="text-[10px] font-mono text-primary animate-pulse tracking-widest uppercase">Indexing_Vault...</p>
+            </div>
+          ) : filteredFiles.length === 0 ? (
+            <div className="p-20 text-center opacity-20 flex flex-col items-center justify-center gap-4">
+               <Database className="w-12 h-12" />
+               <p className="text-[10px] font-mono tracking-widest uppercase">Void_Detected: No_Loot_Found</p>
+            </div>
+          ) : (
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="bg-white/[0.02] border-b border-white/5">
+                  <th className="text-left py-4 px-8 font-black text-muted-foreground uppercase tracking-widest">Metadata</th>
+                  <th className="text-left py-4 px-8 font-black text-muted-foreground uppercase tracking-widest">Classification</th>
+                  <th className="text-right py-4 px-8 font-black text-muted-foreground uppercase tracking-widest">Mass</th>
+                  <th className="text-right py-4 px-8 font-black text-muted-foreground uppercase tracking-widest">Captured_At</th>
+                  <th className="text-right py-4 px-8 font-black text-muted-foreground uppercase tracking-widest">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.05]">
+                {filteredFiles.map((file) => (
+                  <tr 
+                    key={file.id} 
+                    className="hover:bg-primary/[0.03] transition-all group cursor-pointer border-l-2 border-l-transparent hover:border-l-primary"
+                    onClick={() => openFile(file)}
+                  >
+                    <td className="py-4 px-8">
+                      <div className="flex items-center gap-4">
+                        <div className="p-2 bg-white/5 rounded-lg group-hover:bg-primary/20 group-hover:text-primary transition-all">
+                          {file.type.match(/png|jpg|jpeg/) ? <ImageIcon className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
+                        </div>
+                        <span className="font-bold text-foreground group-hover:text-primary transition-colors uppercase tracking-tight">{file.name}</span>
+                      </div>
+                    </td>
+                    <td className="py-4 px-8">
+                       <span className="text-[10px] font-mono bg-white/5 py-1 px-3 rounded-full text-muted-foreground uppercase tracking-tighter">{file.type}</span>
+                    </td>
+                    <td className="py-4 px-8 text-right font-mono text-muted-foreground">{formatSize(file.size)}</td>
+                    <td className="py-4 px-8 text-right text-[10px] text-muted-foreground font-mono opacity-60">
+                      {new Date(file.mtime).toLocaleString()}
+                    </td>
+                    <td className="py-4 px-8 text-right">
+                      <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-all translate-x-2 group-hover:translate-x-0">
+                         <div className="p-2 bg-primary/20 text-primary rounded-lg hover:bg-primary hover:text-black transition-all">
+                           <Eye className="w-4 h-4" />
+                         </div>
+                         <div className="p-2 bg-white/10 text-muted-foreground rounded-lg hover:bg-white/20 transition-all">
+                           <Download className="w-4 h-4" />
+                         </div>
+                      </div>
+                    </td>
                   </tr>
-                </thead>
-                <tbody className="divide-y">
-                  {filteredFiles.map((file) => (
-                    <tr 
-                      key={file.id} 
-                      className="hover:bg-muted/20 group cursor-pointer"
-                      onClick={() => openFile(file)}
-                    >
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-3">
-                          {file.type.match(/png|jpg|jpeg/) ? <ImageIcon className="w-4 h-4 text-purple-400" /> : <FileText className="w-4 h-4 text-muted-foreground" />}
-                          <span className="font-medium">{file.name}</span>
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 capitalize text-muted-foreground">{file.type}</td>
-                      <td className="py-3 px-4 text-right text-muted-foreground">{formatSize(file.size)}</td>
-                      <td className="py-3 px-4 text-right text-xs text-muted-foreground font-mono">
-                        {new Date(file.mtime).toLocaleString()}
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                           <Button variant="ghost" size="icon" className="h-8 w-8">
-                             <Eye className="w-4 h-4" />
-                           </Button>
-                           <Button variant="ghost" size="icon" className="h-8 w-8">
-                            <Download className="w-4 h-4" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
 
       {/* File Previewer */}
       {selectedFile && (

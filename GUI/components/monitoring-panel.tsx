@@ -14,7 +14,8 @@ interface MonitoringPanelProps {
 export default function MonitoringPanel({ selectedClient }: MonitoringPanelProps) {
   const [cpuUsage, setCpuUsage] = useState(0)
   const [memoryUsage, setMemoryUsage] = useState(0)
-  const [networkUsage, setNetworkUsage] = useState(0)
+  const [networkIn, setNetworkIn] = useState(0)
+  const [networkOut, setNetworkOut] = useState(0)
   const [uptime, setUptime] = useState('N/A')
   const [gpuInfo, setGpuInfo] = useState('N/A')
   const [motherboardInfo, setMotherboardInfo] = useState('N/A')
@@ -67,7 +68,8 @@ export default function MonitoringPanel({ selectedClient }: MonitoringPanelProps
               time: i % 2 === 0 ? `${Math.floor(i/2)}:00` : '',
               cpu: Math.round(m.cpu_usage * 100) / 100,
               memory: Math.round(m.memory_usage * 100) / 100,
-              network: m.network_in ? Math.round(m.network_in / 1000) : Math.floor(Math.random() * 50), // Fallback for better visuals
+              networkIn: m.network_in ? Math.round(m.network_in * 100) / 100 : 0,
+              networkOut: m.network_out ? Math.round(m.network_out * 100) / 100 : 0,
             }))
           )
 
@@ -76,7 +78,8 @@ export default function MonitoringPanel({ selectedClient }: MonitoringPanelProps
             const latest = metrics[metrics.length - 1]
             setCpuUsage(Math.round(latest.cpu_usage * 100) / 100)
             setMemoryUsage(Math.round(latest.memory_usage * 100) / 100)
-            setNetworkUsage(latest.network_in ? Math.round(latest.network_in / 1000) : Math.floor(Math.random() * 50))
+            setNetworkIn(latest.network_in ? Math.round(latest.network_in * 100) / 100 : 0)
+            setNetworkOut(latest.network_out ? Math.round(latest.network_out * 100) / 100 : 0)
             setProcesses(latest.processes_count || (Array.isArray(latest.running_processes) ? latest.running_processes.length : 0))
             
             if (latest.uptime) {
@@ -119,18 +122,18 @@ export default function MonitoringPanel({ selectedClient }: MonitoringPanelProps
 
     fetchClientInfo()
     fetchMetrics()
-    const interval = setInterval(fetchMetrics, 5000)
+    const interval = setInterval(fetchMetrics, 2000)
     return () => clearInterval(interval)
   }, [selectedClient, metricsApi.getMetrics, clientsApi.getClientInfo])
 
   if (!selectedClient) {
     return (
       <div className="flex items-center justify-center h-full">
-        <Card className="p-12 text-center max-w-md">
+        <div className="p-12 text-center max-w-md bg-card border rounded-lg">
           <Activity className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
           <h2 className="text-lg font-semibold text-foreground mb-2">No Client Selected</h2>
           <p className="text-muted-foreground text-sm">Select a client from the left panel to view monitoring data</p>
-        </Card>
+        </div>
       </div>
     )
   }
@@ -139,309 +142,125 @@ export default function MonitoringPanel({ selectedClient }: MonitoringPanelProps
     <div className="p-6 space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-3xl font-bold text-foreground mb-2">System Monitoring</h1>
-        <p className="text-muted-foreground">Real-time metrics from selected client</p>
+        <h1 className="text-2xl font-bold text-foreground mb-1 font-sans">System Monitoring</h1>
+        <p className="text-muted-foreground text-xs font-mono uppercase tracking-widest">Client Telemetry Active</p>
       </div>
 
       {/* Key Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <MetricCard
-          icon={Cpu}
-          label="CPU Usage"
-          value={`${cpuUsage}%`}
-          trend="up"
-          color="text-blue-400"
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <MetricCard label="CPU Load" value={`${cpuUsage}%`} icon={Cpu} color="text-primary" />
+        <MetricCard label="Memory Usage" value={`${memoryUsage}%`} icon={HardDrive} color="text-secondary" />
+        <MetricCard 
+            label="Network I/O" 
+            value={
+                <div className="flex flex-col">
+                    <span className="text-blue-400 text-xs">IN: {networkIn} KB/s</span>
+                    <span className="text-purple-400 text-xs">OUT: {networkOut} KB/s</span>
+                </div>
+            } 
+            icon={Network} 
+            color="text-blue-400" 
         />
-        <MetricCard
-          icon={HardDrive}
-          label="Memory Usage"
-          value={`${memoryUsage}%`}
-          trend="up"
-          color="text-purple-400"
-        />
-        <MetricCard
-          icon={Network}
-          label="Network"
-          value={`${networkUsage}%`}
-          trend="down"
-          color="text-cyan-400"
-        />
-        <MetricCard
-          icon={Clock}
-          label="System Uptime"
-          value={uptime}
-          trend="neutral"
-          color="text-green-400"
-        />
+        <MetricCard label="Uptime" value={uptime} icon={Clock} color="text-emerald-400" />
       </div>
 
       {/* Hardware Specifications */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-4 bg-[#0f172a] border-[#1e293b]">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-blue-500/10 rounded-lg">
-              <GpuIcon className="w-5 h-5 text-blue-400" />
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Graphics Processor (GPU)</p>
-              <p className="text-lg font-semibold text-foreground truncate max-w-md">{gpuInfo}</p>
-            </div>
-          </div>
-        </Card>
-        <Card className="p-4 bg-[#0f172a] border-[#1e293b]">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-purple-500/10 rounded-lg">
-              <CircuitBoard className="w-5 h-5 text-purple-400" />
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Motherboard / Baseboard</p>
-              <p className="text-lg font-semibold text-foreground truncate max-w-md">{motherboardInfo}</p>
-            </div>
-          </div>
-        </Card>
+        <div className="bg-card p-4 rounded-lg border">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Graphics Processor</p>
+          <p className="text-sm font-bold font-mono truncate">{gpuInfo}</p>
+        </div>
+        <div className="bg-card p-4 rounded-lg border">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Motherboard</p>
+          <p className="text-sm font-bold font-mono truncate">{motherboardInfo}</p>
+        </div>
       </div>
 
       {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* System Performance Chart */}
-        <Card className="p-6 col-span-1 lg:col-span-2">
-          <h2 className="text-lg font-semibold text-foreground mb-4">System Performance</h2>
-          <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={metricsData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
-              <XAxis dataKey="time" stroke="#888888" />
-              <YAxis stroke="#888888" />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: '#0f172a',
-                  border: '1px solid #1e293b',
-                  borderRadius: '8px',
-                }}
-              />
-              <Line
-                type="monotone"
-                dataKey="cpu"
-                stroke="#60a5fa"
-                dot={false}
-                name="CPU"
-                strokeWidth={2}
-              />
-              <Line
-                type="monotone"
-                dataKey="memory"
-                stroke="#a78bfa"
-                dot={false}
-                name="Memory"
-                strokeWidth={2}
-              />
-              <Line
-                type="monotone"
-                dataKey="network"
-                stroke="#22d3ee"
-                dot={false}
-                name="Network"
-                strokeWidth={2}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </Card>
-
-        {/* Process Information */}
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold text-foreground mb-4">Top Processes</h2>
-          <div className="space-y-3">
-            {processData.slice(0, 4).map((proc, idx) => (
-              <div key={idx} className="flex items-center justify-between p-3 bg-input/50 rounded-lg">
-                <div>
-                  <p className="text-sm font-medium text-foreground">{proc.name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    CPU: {proc.cpu}% | RAM: {proc.memory}MB
-                  </p>
-                </div>
-                <div className="text-right">
-                  <div className="w-16 h-8 bg-input rounded flex items-center justify-center">
-                    <span className="text-xs font-semibold text-foreground">{proc.cpu}%</span>
-                  </div>
-                </div>
-              </div>
-            ))}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="bg-card p-6 lg:col-span-2 rounded-lg border">
+          <h2 className="text-xs font-bold text-muted-foreground mb-6 uppercase tracking-widest">Performance History</h2>
+          <div className="h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={metricsData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" vertical={false} />
+                <XAxis dataKey="time" stroke="#666" fontSize={10} tickLine={false} axisLine={false} />
+                <YAxis stroke="#666" fontSize={10} tickLine={false} axisLine={false} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: '#000', border: '1px solid #333', borderRadius: '4px', fontSize: '10px' }}
+                />
+                <Line type="monotone" dataKey="cpu" stroke="oklch(0.7 0.15 210)" dot={false} strokeWidth={2} name="CPU %" />
+                <Line type="monotone" dataKey="memory" stroke="oklch(0.75 0.2 145)" dot={false} strokeWidth={2} name="MEM %" />
+                <Line type="monotone" dataKey="networkIn" stroke="rgba(96, 165, 250, 0.8)" dot={false} strokeWidth={1.5} name="Net In (KB/s)" />
+                <Line type="monotone" dataKey="networkOut" stroke="rgba(192, 132, 252, 0.8)" dot={false} strokeWidth={1.5} name="Net Out (KB/s)" />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
-        </Card>
+        </div>
 
-        {/* Process Distribution */}
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold text-foreground mb-4">Memory Distribution</h2>
-          <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={processData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
-              <XAxis dataKey="name" stroke="#888888" angle={-45} height={80} />
-              <YAxis stroke="#888888" />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: '#0f172a',
-                  border: '1px solid #1e293b',
-                  borderRadius: '8px',
-                }}
-              />
-              <Bar dataKey="memory" fill="#a78bfa" radius={[8, 8, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
+        <div className="bg-card p-6 rounded-lg border">
+          <h2 className="text-xs font-bold text-muted-foreground mb-6 uppercase tracking-widest">Allocation</h2>
+          <div className="h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={processData.slice(0, 6)}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" vertical={false} />
+                <XAxis dataKey="name" stroke="#666" fontSize={10} tickLine={false} axisLine={false} />
+                <YAxis stroke="#666" fontSize={10} tickLine={false} axisLine={false} />
+                <Bar dataKey="memory" fill="oklch(0.7 0.15 210 / 0.5)" radius={[2, 2, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
       </div>
 
-      {/* System Info */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <Card className="p-6">
-          <div className="flex items-center gap-3 mb-4">
-            <Users className="w-5 h-5 text-blue-400" />
-            <h3 className="text-lg font-semibold text-foreground">Active Processes</h3>
+      {/* Network & Processes */}
+      <div className="grid grid-cols-1 gap-6">
+        <div className="bg-card rounded-lg border overflow-hidden">
+          <div className="p-4 border-b">
+             <h2 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Active Network Nodes</h2>
           </div>
-          <p className="text-3xl font-bold text-blue-400">{processes}</p>
-          <p className="text-sm text-muted-foreground mt-2">Running on system</p>
-        </Card>
-
-        <Card className="p-6">
-          <div className="flex items-center gap-3 mb-4">
-            <AlertCircle className="w-5 h-5 text-amber-400" />
-            <h3 className="text-lg font-semibold text-foreground">Threat Level</h3>
+          <div className="p-0 overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/50">
+                <tr className="text-muted-foreground uppercase text-[9px] tracking-tighter text-left">
+                  <th className="p-3">Protocol</th>
+                  <th className="p-3">Local</th>
+                  <th className="p-3">Remote</th>
+                  <th className="p-3">State</th>
+                  <th className="p-3">Process</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y border-t">
+                {networkConnections.slice(0, 10).map((conn, idx) => (
+                  <tr key={idx} className="hover:bg-muted/30">
+                    <td className="p-3 font-bold">{conn.protocol}</td>
+                    <td className="p-3 font-mono">{conn.local}</td>
+                    <td className="p-3 font-mono">{conn.remote}</td>
+                    <td className="p-3">
+                      <span className={`px-1.5 py-0.5 rounded-sm font-bold uppercase text-[9px] ${conn.state === 'ESTABLISHED' ? 'bg-green-500/10 text-green-500' : 'bg-yellow-500/10 text-yellow-500'}`}>
+                        {conn.state}
+                      </span>
+                    </td>
+                    <td className="p-3 text-muted-foreground">{conn.process}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-          <p className="text-3xl font-bold text-amber-400">{threat}</p>
-          <p className="text-sm text-muted-foreground mt-2">System security status</p>
-        </Card>
-
-        <Card className="p-6">
-          <div className="flex items-center gap-3 mb-4">
-            <HardDrive className="w-5 h-5 text-cyan-400" />
-            <h3 className="text-lg font-semibold text-foreground">Disk Space</h3>
-          </div>
-          <p className="text-3xl font-bold text-cyan-400">847 GB</p>
-          <p className="text-sm text-muted-foreground mt-2">Total available</p>
-        </Card>
+        </div>
       </div>
-
-      {/* Network Connections */}
-      <Card className="p-6">
-        <h2 className="text-lg font-semibold text-foreground mb-4">Active Network Connections</h2>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border">
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">Protocol</th>
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">Local Address</th>
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">Remote Address</th>
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">State</th>
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">Process</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {(networkConnections.length > 0 ? networkConnections : [
-                { protocol: 'TCP', local: '192.168.1.105:49200', remote: '8.8.8.8:443', state: 'ESTABLISHED', process: 'chrome.exe' },
-                { protocol: 'TCP', local: '192.168.1.105:49201', remote: '142.250.80.46:443', state: 'ESTABLISHED', process: 'firefox.exe' },
-                { protocol: 'TCP', local: '192.168.1.105:49202', remote: '1.1.1.1:53', state: 'TIME_WAIT', process: 'System' },
-                { protocol: 'UDP', local: '192.168.1.105:53', remote: '0.0.0.0:0', state: 'LISTENING', process: 'dns.exe' },
-              ]).map((conn, idx) => (
-                <tr key={idx} className="hover:bg-input/30 transition-colors">
-                  <td className="py-3 px-3 text-foreground">{conn.protocol}</td>
-                  <td className="py-3 px-3 text-foreground">{conn.local}</td>
-                  <td className="py-3 px-3 text-foreground">{conn.remote}</td>
-                  <td className="py-3 px-3">
-                    <span
-                      className={`px-2 py-1 rounded text-xs font-medium ${
-                        conn.state === 'ESTABLISHED'
-                          ? 'bg-green-400/20 text-green-400'
-                          : 'bg-amber-400/20 text-amber-400'
-                      }`}
-                    >
-                      {conn.state}
-                    </span>
-                  </td>
-                  <td className="py-3 px-3 text-muted-foreground">{conn.process}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      {/* Real-Time Client Processes Surveillance */}
-      <Card className="p-6">
-        <h2 className="text-lg font-semibold text-foreground mb-4">Active Processes</h2>
-        <div className="overflow-x-auto max-h-[400px]">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-card z-10">
-              <tr className="border-b border-border">
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">PID</th>
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">Process Name</th>
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">CPU (%)</th>
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">Memory (MB)</th>
-                <th className="text-left py-2 px-3 text-muted-foreground font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border pt-2">
-              {(processData.length > 0 ? processData : [
-                { pid: 4, name: 'System', cpu: 1.2, memory: 0.1, status: 'Running' },
-                { pid: 412, name: 'csrss.exe', cpu: 0.1, memory: 2.1, status: 'Running' },
-                { pid: 1420, name: 'svchost.exe', cpu: 0.0, memory: 15.3, status: 'Running' },
-                { pid: 6512, name: 'chrome.exe', cpu: 4.5, memory: 245.8, status: 'Running' },
-              ]).map((proc, idx) => (
-                <tr key={`${proc.pid}-${idx}`} className="hover:bg-input/30 transition-colors">
-                  <td className="py-2 px-3 text-foreground font-mono text-xs">{proc.pid}</td>
-                  <td className="py-2 px-3 text-foreground">{proc.name}</td>
-                  <td className="py-2 px-3 text-blue-400">{proc.cpu}%</td>
-                  <td className="py-2 px-3 text-purple-400">{proc.memory} MB</td>
-                  <td className="py-2 px-3">
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-medium uppercase ${
-                        proc.status?.toLowerCase() === 'running' 
-                          ? 'bg-green-400/20 text-green-400'
-                          : 'bg-amber-400/20 text-amber-400'
-                      }`}
-                    >
-                      {proc.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
     </div>
   )
 }
 
-function MetricCard({
-  icon: Icon,
-  label,
-  value,
-  trend,
-  color,
-}: {
-  icon: any
-  label: string
-  value: string
-  trend: 'up' | 'down' | 'neutral'
-  color: string
-}) {
+function MetricCard({ label, value, icon: Icon, color }: any) {
   return (
-    <Card className="p-6 relative overflow-hidden">
-      <div className="absolute top-0 right-0 w-20 h-20 -mr-8 -mt-8 opacity-10">
-        <Icon className={`w-20 h-20 ${color}`} />
+    <div className="bg-card p-5 rounded-lg border">
+      <div className="flex items-center gap-2 mb-3">
+        <Icon className={`w-4 h-4 ${color}`} />
+        <p className="text-[10px] text-muted-foreground font-bold uppercase tracking-widest">{label}</p>
       </div>
-      <div className="relative">
-        <div className="flex items-center gap-2 mb-2">
-          <Icon className={`w-5 h-5 ${color}`} />
-          <p className="text-sm text-muted-foreground">{label}</p>
-        </div>
-        <p className="text-3xl font-bold text-foreground mb-2">{value}</p>
-        <div className={`text-xs font-semibold flex items-center gap-1 ${
-          trend === 'up' ? 'text-amber-400' : trend === 'down' ? 'text-green-400' : 'text-blue-400'
-        }`}>
-          {trend === 'up' && '↑ increasing'}
-          {trend === 'down' && '↓ decreasing'}
-          {trend === 'neutral' && '→ stable'}
-        </div>
-      </div>
-    </Card>
+      <div className="text-2xl font-bold font-mono">{value}</div>
+    </div>
   )
 }

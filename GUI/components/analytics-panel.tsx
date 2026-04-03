@@ -29,21 +29,21 @@ export default function AnalyticsPanel() {
         const res = await fetch('/api/analytics')
         const json = await res.json()
         if (json.success) {
-          const d = json.data
+          const d = json.data || {}
           setData({
-            activityTrends: d.activityTrends.length > 0 ? d.activityTrends : [],
-            lootDistribution: d.lootDist.length > 0 ? d.lootDist.map((l: any, i: number) => ({
-                name: l.name,
-                value: l.value,
+            activityTrends: Array.isArray(d.activityTrends) ? d.activityTrends : [],
+            lootDistribution: Array.isArray(d.lootDist) ? d.lootDist.map((l: any, i: number) => ({
+                name: l.name || 'Unknown',
+                value: Number(l.value || 0),
                 color: COLORS[i % COLORS.length]
             })) : [],
-            commandStats: d.cmdHistory?.length > 0 ? d.cmdHistory.map((h: any) => ({
-                name: h.date.split('-').slice(1).join('/'),
-                success: h.success,
-                fail: h.fail
+            commandStats: Array.isArray(d.cmdHistory) ? d.cmdHistory.map((h: any) => ({
+                name: h.date ? h.date.split('-').slice(1).join('/') : 'N/A',
+                success: Number(h.success || 0),
+                fail: Number(h.fail || 0)
             })) : [],
-            osDistribution: d.osDist || [],
-            topLocations: d.topLocations || [],
+            osDistribution: Array.isArray(d.osDist) ? d.osDist : [],
+            topLocations: Array.isArray(d.topLocations) ? d.topLocations : [],
             privileges: d.privileges || { admin: 0, standard: 0 },
             integrityScore: d.integrityScore || 0,
             totalClients: d.totalClients || 0,

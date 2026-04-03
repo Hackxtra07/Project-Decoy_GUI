@@ -15,27 +15,33 @@ export default function Dashboard() {
   const [selectedClient, setSelectedClient] = useState<string | null>(null)
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex h-screen bg-background overflow-hidden relative">
+      {/* Absolute Decorative Elements */}
+      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/5 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary/5 rounded-full blur-[120px] pointer-events-none" />
+
       <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
       
       <div className="flex-1 flex overflow-hidden">
-        {/* Clients panel */}
-        <div className="w-80 border-r border-border bg-card overflow-y-auto">
+        {/* Clients panel - Dedicated side navigation for nodes */}
+        <div className="w-80 border-r border-border/20 bg-black/20 backdrop-blur-md overflow-y-auto">
           <ClientsPanel selectedClient={selectedClient} setSelectedClient={setSelectedClient} />
         </div>
 
-        {/* Main content area */}
-        <div className="flex-1 overflow-y-auto">
-          {activeTab === 'overview' && <MonitoringPanel selectedClient={selectedClient} />}
-          {activeTab === 'commands' && <CommandPanel selectedClient={selectedClient} />}
-          {activeTab === 'monitoring' && <MonitoringPanel selectedClient={selectedClient} />}
-          {activeTab === 'clients' && <ClientsPanel selectedClient={selectedClient} setSelectedClient={setSelectedClient} />}
-          {activeTab === 'loot' && <LootPanel />}
-          {activeTab === 'analytics' && <AnalyticsPanel />}
-          {activeTab === 'tasks' && <TasksPanel />}
-          {activeTab === 'files' && <FileBrowserPanel selectedClient={selectedClient} />}
+        {/* Main content area - Dynamic view based on tab */}
+        <div className="flex-1 overflow-y-auto bg-white/[0.02] backdrop-blur-[2px] transition-all duration-500">
+          <div className="p-1 h-full"> 
+            {activeTab === 'overview' && <MonitoringPanel selectedClient={selectedClient} />}
+            {activeTab === 'commands' && <CommandPanel selectedClient={selectedClient} />}
+            {activeTab === 'monitoring' && <MonitoringPanel selectedClient={selectedClient} />}
+            {activeTab === 'loot' && <LootPanel />}
+            {activeTab === 'analytics' && <AnalyticsPanel />}
+            {activeTab === 'tasks' && <TasksPanel />}
+            {activeTab === 'files' && <FileBrowserPanel selectedClient={selectedClient} />}
+          </div>
         </div>
       </div>
     </div>
   )
 }
+

@@ -13,20 +13,24 @@ async function sendAndWait(
   params: Record<string, any>,
   timeoutMs = 20000
 ): Promise<any> {
-  const db = getDatabase()
+  const db = await getDatabase()
 
   // Create command record
-  const { createCommand: cc } = await import('@/lib/commands')
-  const cmd = cc({ client_id: clientId, command_type: commandType, command_name: commandType, parameters: params })
+  const cmd = await createCommand({ 
+    client_id: clientId, 
+    command_type: commandType, 
+    command_name: commandType, 
+    parameters: params 
+  })
 
   // Poll for result
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 400))
-    const row = db.prepare('SELECT status,result,error_message FROM commands WHERE id = ?').get(cmd.id) as any
-    if (!row) throw new Error('Command not found')
+    const row = await db.prepare('SELECT status,result,error_message FROM commands WHERE id = ?').get([cmd.id]) as any
+    if (!row) continue // Wait for insertion or retry
     if (row.status === 'completed') {
-      const data = row.result ? JSON.parse(row.result) : {}
+      const data = row.result ? (typeof row.result === 'string' ? JSON.parse(row.result) : row.result) : {}
       return data
     }
     if (row.status === 'failed') throw new Error(row.error_message || 'Command failed')

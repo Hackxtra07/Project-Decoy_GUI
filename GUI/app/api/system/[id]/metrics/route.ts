@@ -15,11 +15,11 @@ export async function GET(
     let data: any
 
     if (type === 'latest') {
-      data = systemMonitor.getLatestMetrics(id)
+      data = await systemMonitor.getLatestMetrics(id)
     } else if (type === 'timeseries') {
-      data = systemMonitor.getMetricsTimeseries(id, hours, limit)
+      data = await systemMonitor.getMetricsTimeseries(id, hours, limit)
     } else if (type === 'aggregate') {
-      data = systemMonitor.getAggregateMetrics(id, hours)
+      data = await systemMonitor.getAggregateMetrics(id, hours)
     } else {
       return NextResponse.json(
         {

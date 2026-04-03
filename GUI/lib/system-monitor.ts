@@ -1,5 +1,4 @@
 import { getDatabase } from './db'
-import { v4 as uuidv4 } from 'uuid'
 
 export interface SystemMetrics {
   id?: number
@@ -9,6 +8,7 @@ export interface SystemMetrics {
   memory_total: number
   disk_usage: number
   disk_total: number
+  network_in: number
   uptime?: number
   network_interfaces: string
   running_processes: string
@@ -24,9 +24,10 @@ export class SystemMonitor {
     memory_total: number
     disk_usage: number
     disk_total: number
-    network_interfaces?: Record<string, any>
-    running_processes?: string[]
-    network_connections?: Record<string, any>
+    network_in?: number
+    network_interfaces?: any
+    running_processes?: any
+    network_connections?: any
     uptime?: number
   }): Promise<SystemMetrics> {
     const db = await getDatabase()
@@ -34,112 +35,128 @@ export class SystemMonitor {
 
     const metrics: any = {
       client_id: data.client_id,
-      cpu_usage: data.cpu_usage,
-      memory_usage: data.memory_usage,
-      memory_total: data.memory_total,
-      disk_usage: data.disk_usage,
-      disk_total: data.disk_total,
-      network_interfaces: data.network_interfaces || {},
-      running_processes: data.running_processes || [],
-      network_connections: data.network_connections || {},
-      uptime: data.uptime || 0,
+      cpu_usage: Number(data.cpu_usage || 0),
+      memory_usage: Number(data.memory_usage || 0),
+      memory_total: Number(data.memory_total || 0),
+      disk_usage: Number(data.disk_usage || 0),
+      disk_total: Number(data.disk_total || 0),
+      network_in: Number(data.network_in || 0),
+      network_interfaces: JSON.stringify(data.network_interfaces || {}),
+      running_processes: JSON.stringify(data.running_processes || []),
+      network_connections: JSON.stringify(data.network_connections || {}),
+      uptime: Number(data.uptime || 0),
       timestamp: now
     }
 
-    await db.collection('system_info').insertOne(metrics)
+    try {
+        const columns = Object.keys(metrics).join(', ');
+        const placeholders = Object.keys(metrics).map(() => '?').join(', ');
+        await db.prepare(`INSERT INTO system_info (${columns}) VALUES (${placeholders})`).all(Object.values(metrics));
+    } catch (e) {
+        console.error('[SystemMonitor] Record Error:', e);
+    }
+    
     return metrics
   }
 
   async getClientMetrics(client_id: string, limit = 100): Promise<SystemMetrics[]> {
     const db = await getDatabase()
-    const rows = await db.collection('system_info')
-      .find({ client_id })
-      .sort({ timestamp: -1 })
-      .limit(limit)
-      .toArray() as any[]
-    return rows as SystemMetrics[]
+    try {
+        const rows = await db.prepare(`
+            SELECT * FROM system_info 
+            WHERE client_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        `).all([client_id, limit]);
+        return rows as SystemMetrics[];
+    } catch (e) {
+        return [];
+    }
   }
 
   async getLatestMetrics(client_id: string): Promise<SystemMetrics | null> {
     const db = await getDatabase()
-    const row = await db.collection('system_info')
-      .find({ client_id })
-      .sort({ timestamp: -1 })
-      .limit(1)
-      .next() as any
-    return row as SystemMetrics | null
-  }
-
-  async getAllLatestMetrics(): Promise<Map<string, SystemMetrics>> {
-    const db = await getDatabase()
-    const metricsMap = new Map<string, SystemMetrics>()
-    
-    const rows = await db.collection('system_info').aggregate([
-      { $sort: { timestamp: -1 } },
-      { $group: { _id: "$client_id", latest: { $first: "$$ROOT" } } }
-    ]).toArray()
-
-    for (const row of rows) {
-      metricsMap.set(row._id, row.latest)
+    try {
+        const row = await db.prepare(`
+            SELECT * FROM system_info 
+            WHERE client_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        `).get([client_id]);
+        return row as SystemMetrics || null;
+    } catch (e) {
+        return null;
     }
-    return metricsMap
   }
 
   async getMetricsTimeseries(client_id: string, hours = 24, limit = 0): Promise<SystemMetrics[]> {
     const db = await getDatabase()
-    let rows: any[] = []
-    
-    if (limit > 0) {
-      rows = await db.collection('system_info')
-        .find({ client_id })
-        .sort({ timestamp: -1 })
-        .limit(limit)
-        .toArray() as any[]
-      rows.reverse()
-    } else {
-      const date = new Date()
-      date.setHours(date.getHours() - hours)
-      const timestamp = date.toISOString()
+    try {
+        let sql = `SELECT * FROM system_info WHERE client_id = ?`;
+        const args: any[] = [client_id];
 
-      rows = await db.collection('system_info')
-        .find({ client_id, timestamp: { $gt: timestamp } })
-        .sort({ timestamp: 1 })
-        .toArray() as any[]
+        if (limit > 0) {
+            sql += ` ORDER BY timestamp DESC LIMIT ?`;
+            args.push(limit);
+            const rows = await db.prepare(sql).all(args);
+            return rows.reverse() as SystemMetrics[];
+        } else {
+            const date = new Date();
+            date.setHours(date.getHours() - hours);
+            sql += ` AND timestamp > ? ORDER BY timestamp ASC`;
+            args.push(date.toISOString());
+            const rows = await db.prepare(sql).all(args);
+            return rows as SystemMetrics[];
+        }
+    } catch (e) {
+        return [];
     }
-
-    return rows as SystemMetrics[]
   }
 
   async getAggregateMetrics(client_id: string, hours = 24) {
     const db = await getDatabase()
     const date = new Date()
     date.setHours(date.getHours() - hours)
-    const timestamp = date.toISOString()
+    
+    try {
+        const stats = await db.prepare(`
+            SELECT 
+                AVG(cpu_usage) as avg_cpu,
+                MAX(cpu_usage) as max_cpu,
+                AVG(memory_usage) as avg_memory,
+                MAX(memory_usage) as max_memory,
+                AVG(disk_usage) as avg_disk,
+                MAX(disk_usage) as max_disk
+            FROM system_info
+            WHERE client_id = ? AND timestamp > ?
+        `).get([client_id, date.toISOString()]);
 
-    const stats = await db.collection('system_info').aggregate([
-      { $match: { client_id, timestamp: { $gt: timestamp } } },
-      {
-        $group: {
-          _id: null,
-          avg_cpu: { $avg: "$cpu_usage" },
-          max_cpu: { $max: "$cpu_usage" },
-          avg_memory: { $avg: "$memory_usage" },
-          max_memory: { $max: "$memory_usage" },
-          avg_disk: { $avg: "$disk_usage" },
-          max_disk: { $max: "$disk_usage" }
+        if (!stats || stats.avg_cpu === null) return null;
+
+        return {
+            avg_cpu: Number(stats.avg_cpu),
+            max_cpu: Number(stats.max_cpu),
+            avg_memory: Number(stats.avg_memory),
+            max_memory: Number(stats.max_memory),
+            avg_disk: Number(stats.avg_disk),
+            max_disk: Number(stats.max_disk),
         }
-      }
-    ]).next() as any
+    } catch (e) {
+        return null;
+    }
+  }
 
-    if (!stats) return null
-
-    return {
-      avg_cpu: stats.avg_cpu,
-      max_cpu: stats.max_cpu,
-      avg_memory: stats.avg_memory,
-      max_memory: stats.max_memory,
-      avg_disk: stats.avg_disk,
-      max_disk: stats.max_disk,
+  async getAllLatestMetrics(): Promise<any[]> {
+    const db = await getDatabase()
+    try {
+        const rows = await db.prepare(`
+            SELECT * FROM system_info 
+            WHERE id IN (SELECT MAX(id) FROM system_info GROUP BY client_id)
+            ORDER BY timestamp DESC
+        `).all([]);
+        return rows as any[];
+    } catch (e) {
+        return [];
     }
   }
 
@@ -147,9 +164,7 @@ export class SystemMonitor {
     const db = await getDatabase()
     const date = new Date()
     date.setDate(date.getDate() - days)
-    const timestamp = date.toISOString()
-
-    await db.collection('system_info').deleteMany({ timestamp: { $lt: timestamp } })
+    await db.prepare(`DELETE FROM system_info WHERE timestamp < ?`).all([date.toISOString()]);
   }
 }
 

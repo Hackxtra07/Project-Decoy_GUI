@@ -21,50 +21,56 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
   ]
 
   return (
-    <div className="w-64 bg-sidebar border-r border-sidebar-border flex flex-col">
+    <div className="w-64 bg-sidebar border-r border-sidebar-border flex flex-col custom-scrollbar">
       {/* Header */}
-      <div className="p-6 border-b border-sidebar-border">
-        <div className="flex items-center gap-3 mb-2">
-          <div className="w-10 h-10 bg-sidebar-primary rounded-lg flex items-center justify-center">
-            <Zap className="w-6 h-6 text-sidebar-primary-foreground" />
+      <div className="p-8 border-b border-sidebar-border/50">
+        <div className="flex flex-col items-center gap-4 mb-2">
+          <div className="w-16 h-16 bg-primary/10 rounded-xl flex items-center justify-center border border-primary/20">
+            <Zap className="w-10 h-10 text-primary" />
           </div>
-          <div>
-            <h1 className="text-lg font-bold text-sidebar-foreground">C2 Server</h1>
-            <p className="text-xs text-sidebar-accent-foreground opacity-70">v5.0 Elite</p>
+          <div className="text-center">
+            <h1 className="text-xl font-bold tracking-[0.2em] uppercase">DECOY</h1>
+            <p className="text-[10px] font-mono text-secondary opacity-80 uppercase tracking-widest mt-1">v5.0 ELITE C2</p>
           </div>
         </div>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-4 space-y-2">
+      <nav className="flex-1 p-4 space-y-2 mt-4">
         {navItems.map((item) => {
           const Icon = item.icon
+          const isActive = activeTab === item.id
           return (
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id as any)}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-                activeTab === item.id
-                  ? 'bg-sidebar-primary text-sidebar-primary-foreground'
-                  : 'text-sidebar-foreground hover:bg-sidebar-accent'
+              className={`w-full flex items-center gap-4 px-6 py-3 rounded-lg transition-all duration-200 group ${
+                isActive
+                  ? 'bg-primary/10 text-primary border border-primary/20'
+                  : 'text-foreground/60 hover:text-foreground hover:bg-white/5'
               }`}
             >
-              <Icon className="w-5 h-5" />
-              <span className="font-medium text-sm">{item.label}</span>
+              <div className="transition-transform duration-200">
+                <Icon className="w-5 h-5" />
+              </div>
+              <span className={`text-[11px] font-bold uppercase tracking-[0.15em]`}>{item.label}</span>
+              {isActive && (
+                <div className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
+              )}
             </button>
           )
         })}
       </nav>
 
       {/* Footer */}
-      <div className="p-4 border-t border-sidebar-border space-y-2">
-        <button className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sidebar-foreground hover:bg-sidebar-accent transition-colors">
-          <Settings className="w-5 h-5" />
-          <span className="font-medium text-sm">Settings</span>
+      <div className="p-4 border-t border-sidebar-border/20 space-y-2 bg-black/20">
+        <button className="w-full flex items-center gap-4 px-6 py-4 rounded-xl text-foreground/40 hover:text-foreground/90 hover:bg-white/5 transition-all duration-300 group">
+          <Settings className="w-5 h-5 group-hover:rotate-90 transition-transform" />
+          <span className="text-[11px] font-bold uppercase tracking-widest">Settings</span>
         </button>
-        <button className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-red-400 hover:bg-red-500/10 transition-colors">
+        <button className="w-full flex items-center gap-4 px-6 py-4 rounded-xl text-destructive/50 hover:text-destructive hover:bg-destructive/10 transition-all duration-300 group">
           <LogOut className="w-5 h-5" />
-          <span className="font-medium text-sm">Disconnect</span>
+          <span className="text-[11px] font-bold uppercase tracking-widest">Disconnect</span>
         </button>
       </div>
     </div>

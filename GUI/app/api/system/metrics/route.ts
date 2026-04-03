@@ -3,8 +3,7 @@ import { systemMonitor } from '@/lib/system-monitor'
 
 export async function GET(request: NextRequest) {
   try {
-    const metricsMap = systemMonitor.getAllLatestMetrics()
-    const metricsArray = Array.from(metricsMap.values())
+    const metricsArray = await systemMonitor.getAllLatestMetrics()
 
     return NextResponse.json({
       success: true,

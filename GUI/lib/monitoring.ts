@@ -11,6 +11,8 @@ export interface SystemMetrics {
   network_interfaces?: any
   running_processes?: any
   network_connections?: any
+  network_in?: number
+  network_out?: number
   timestamp: string
 }
 
@@ -24,6 +26,8 @@ export interface CreateMetricsInput {
   network_interfaces?: any
   running_processes?: any
   network_connections?: any
+  network_in?: number
+  network_out?: number
 }
 
 export async function recordMetrics(input: CreateMetricsInput): Promise<SystemMetrics> {
@@ -40,6 +44,8 @@ export async function recordMetrics(input: CreateMetricsInput): Promise<SystemMe
     network_interfaces: input.network_interfaces || [],
     running_processes: input.running_processes || [],
     network_connections: input.network_connections || [],
+    network_in: input.network_in || 0,
+    network_out: input.network_out || 0,
     timestamp: now
   }
 
@@ -163,6 +169,8 @@ function formatMetrics(row: any): SystemMetrics {
     network_interfaces: row.network_interfaces,
     running_processes: row.running_processes,
     network_connections: row.network_connections,
+    network_in: row.network_in,
+    network_out: row.network_out,
     timestamp: row.timestamp,
   }
 }

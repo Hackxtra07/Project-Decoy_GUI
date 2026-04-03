@@ -195,7 +195,7 @@ export default function CommandPanel({ selectedClient }: CommandPanelProps) {
     }
 
     fetchHistory()
-    const interval = setInterval(fetchHistory, 1000)
+    const interval = setInterval(fetchHistory, 400)
     return () => clearInterval(interval)
   }, [selectedClient])
 
@@ -294,48 +294,48 @@ export default function CommandPanel({ selectedClient }: CommandPanelProps) {
   }
 
   return (
-    <div className="flex h-full bg-background overflow-hidden">
+    <div className="flex h-full bg-[#030712] overflow-hidden">
       {/* Left Sidebar: Command Library */}
-      <div className="w-72 border-r border-border bg-card/30 flex flex-col min-h-0">
-        <div className="p-4 border-b border-border">
-          <h2 className="text-sm font-bold flex items-center gap-2 mb-3">
-            <Terminal className="w-4 h-4 text-primary" /> COMMAND LIBRARY
+      <div className="w-64 border-r border-white/5 bg-black/40 backdrop-blur-xl flex flex-col min-h-0">
+        <div className="p-4 border-b border-white/5">
+          <h2 className="text-[9px] font-black flex items-center gap-2 mb-3 tracking-[0.2em] text-primary/80">
+            <Terminal className="w-3 h-3" /> COMMANDS
           </h2>
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-muted-foreground" />
+          <div className="relative group">
+            <Search className="w-3 h-3 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/50 group-focus-within:text-primary transition-colors" />
             <input 
               type="text" 
-              placeholder="Search commands..." 
+              placeholder="SEARCH..." 
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-input/50 border border-border rounded-md pl-8 pr-3 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary placeholder:text-muted-foreground"
+              className="w-full bg-white/[0.02] border border-white/5 rounded-lg pl-8 pr-3 py-2 text-[10px] text-foreground focus:outline-none focus:border-primary/30 placeholder:text-muted-foreground/20 transition-all font-mono"
             />
           </div>
         </div>
         
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto custom-scrollbar">
           {filteredCategories.length === 0 ? (
-            <div className="p-4 text-center text-xs text-muted-foreground mt-4">
-              No commands found
+            <div className="p-8 text-center text-[10px] text-muted-foreground uppercase opacity-50 font-mono tracking-widest">
+              No nodes detected
             </div>
           ) : (
             filteredCategories.map((cat) => (
-              <div key={cat} className="mb-4">
-                <div className="px-4 py-2 text-[10px] font-bold text-muted-foreground uppercase tracking-widest bg-muted/30">
+              <div key={cat} className="mb-6">
+                <div className="px-5 py-2 text-[8px] font-bold text-white/10 uppercase tracking-[0.3em]">
                   {cat}
                 </div>
-                <div className="px-2 mt-1 space-y-1">
+                <div className="px-2 space-y-0.5">
                   {filteredCommands.filter(c => c.category === cat).map((cmd) => (
                   <button
                     key={cmd.id}
                     onClick={() => setSelectedCommandId(cmd.id)}
-                    className={`w-full text-left px-3 py-2 rounded-md text-xs transition-all flex items-center gap-2 ${
+                    className={`w-full text-left px-3 py-2 rounded-lg text-[10px] font-medium transition-all flex items-center gap-2 border border-transparent ${
                       selectedCommandId === cmd.id 
-                      ? 'bg-primary text-primary-foreground shadow-lg shadow-primary/20' 
-                      : 'hover:bg-muted text-foreground/80 hover:text-foreground'
+                      ? 'bg-primary/5 border-primary/20 text-primary' 
+                      : 'hover:bg-white/5 text-muted-foreground hover:text-foreground'
                     }`}
                   >
-                    <cmd.icon className={`w-3.5 h-3.5 ${selectedCommandId === cmd.id ? 'text-current' : cmd.color}`} />
+                    <cmd.icon className={`w-3 h-3 ${selectedCommandId === cmd.id ? 'text-primary' : cmd.color + ' opacity-50'}`} />
                     <span className="truncate">{cmd.name}</span>
                   </button>
                 ))}
@@ -348,17 +348,17 @@ export default function CommandPanel({ selectedClient }: CommandPanelProps) {
 
       {/* Center/Right: Execution & Output */}
       <div className="flex-1 flex flex-col min-w-0">
-        <div className="flex-1 flex flex-col md:flex-row min-h-0">
+        <div className="flex-1 flex flex-col xl:flex-row min-h-0">
           {/* Selected Command Detail */}
-          <div className="w-full md:w-80 p-6 border-r border-border flex flex-col bg-card/10">
+          <div className="w-full xl:w-72 p-6 border-r border-white/5 flex flex-col bg-white/[0.01]">
             {selectedCommand ? (
-              <div className="space-y-6">
-                <div>
+              <div className="space-y-6 animate-in fade-in slide-in-from-right-2 duration-300">
+                <div className="border border-white/5 p-4 rounded-xl relative group bg-white/[0.02]">
                   <div className="flex items-center gap-3 mb-2">
-                     <selectedCommand.icon className={`w-6 h-6 ${selectedCommand.color}`} />
-                     <h2 className="text-xl font-bold">{selectedCommand.name}</h2>
+                     <selectedCommand.icon className={`w-4 h-4 ${selectedCommand.color}`} />
+                     <h2 className="text-sm font-bold text-foreground tracking-tight uppercase">{selectedCommand.name}</h2>
                   </div>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">
                     {selectedCommand.description}
                   </p>
                 </div>
@@ -366,25 +366,25 @@ export default function CommandPanel({ selectedClient }: CommandPanelProps) {
                 {selectedCommand.id === 'input_control' ? (
                   <InteractiveTrackpad onAction={(p) => executeCommand(selectedCommand, p)} />
                 ) : selectedCommand.params && (
-                  <div className="space-y-4">
-                    <h3 className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Parameters</h3>
-                    <div className="space-y-3">
+                  <div className="space-y-5">
+                    <h3 className="text-[10px] font-black text-primary/40 uppercase tracking-[0.3em]">Payload Configuration</h3>
+                    <div className="space-y-4">
                         {selectedCommand.params.map((param) => {
                           const options = paramOptions[selectedCommand.id]?.[param]
                           const isNumber = ['level', 'duration', 'fps', 'x', 'y'].includes(param)
 
                           return (
-                          <div key={param} className="space-y-1.5 text-xs">
-                            <label className="capitalize font-medium block text-foreground/70">{param.replace(/_/g, ' ')}</label>
+                          <div key={param} className="space-y-2">
+                            <label className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest block pl-1">{param.replace(/_/g, ' ')}</label>
                             {options ? (
                               <select
                                 value={params[selectedCommand.id]?.[param] || ''}
                                 onChange={(e) => handleParamChange(selectedCommand.id, param, e.target.value)}
-                                className="w-full px-3 py-2 bg-input/50 border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-primary text-foreground transition-all font-mono"
+                                className="w-full px-4 py-3 bg-white/[0.03] border border-white/10 rounded-xl focus:outline-none focus:border-primary/50 text-xs text-foreground transition-all font-mono appearance-none cursor-pointer hover:bg-white/[0.05]"
                               >
-                                <option value="" disabled>Select {param}...</option>
+                                <option value="" disabled className="bg-[#030712]">SELECT {param.toUpperCase()}...</option>
                                 {options.map(opt => (
-                                  <option key={opt} value={opt}>{opt}</option>
+                                  <option key={opt} value={opt} className="bg-[#030712]">{opt.toUpperCase()}</option>
                                 ))}
                               </select>
                             ) : (
@@ -392,8 +392,8 @@ export default function CommandPanel({ selectedClient }: CommandPanelProps) {
                                 type={isNumber ? "number" : "text"}
                                 value={params[selectedCommand.id]?.[param] || ''}
                                 onChange={(e) => handleParamChange(selectedCommand.id, param, e.target.value)}
-                                placeholder={`Enter ${param}...`}
-                                className="w-full px-3 py-2 bg-input/50 border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-primary text-foreground placeholder:text-muted-foreground/50 transition-all font-mono"
+                                placeholder={`ENTER ${param.toUpperCase()}...`}
+                                className="w-full px-4 py-3 bg-white/[0.03] border border-white/10 rounded-xl focus:outline-none focus:border-primary/50 text-xs text-foreground placeholder:text-muted-foreground/20 transition-all font-mono"
                               />
                             )}
                           </div>
@@ -406,47 +406,54 @@ export default function CommandPanel({ selectedClient }: CommandPanelProps) {
                 {selectedCommand.id !== 'input_control' && (
                   <Button 
                      onClick={() => executeCommand(selectedCommand)}
-                     className="w-full py-6 text-sm font-bold tracking-tight shadow-xl shadow-primary/10 transition-transform active:scale-95"
+                     className="w-full py-6 text-[10px] font-bold tracking-[0.1em] uppercase rounded-xl bg-primary text-black hover:bg-primary/90 transition-all active:scale-[0.98] mt-2"
                   >
-                    <Send className="w-4 h-4 mr-2" /> SEND COMMAND
+                    <Send className="w-3 h-3 mr-2" /> SEND COMMAND
                   </Button>
                 )}
               </div>
             ) : (
-              <div className="h-full flex flex-col items-center justify-center text-center p-4">
-                <MousePointer2 className="w-10 h-10 text-muted-foreground/30 mb-4" />
-                <h3 className="text-sm font-medium text-muted-foreground">Select a command to configure</h3>
+              <div className="h-full flex flex-col items-center justify-center text-center p-8 opacity-20">
+                <MousePointer2 className="w-12 h-12 text-muted-foreground mb-6 animate-pulse" />
+                <h3 className="text-xs font-black tracking-widest text-muted-foreground uppercase">Targeting offline...</h3>
               </div>
             )}
           </div>
 
           {/* Real-time Console */}
-          <div className="flex-1 flex flex-col bg-[#050505] relative border-l border-white/5 shadow-[inset_10px_0_30px_rgba(0,0,0,0.5)]">
-             <div className="px-4 py-2 border-b border-white/5 bg-white/[0.02] flex items-center justify-between">
-                <span className="text-[10px] font-bold text-primary flex items-center gap-2">
-                   <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" /> LIVE CONSOLE
+          <div className="flex-1 flex flex-col bg-[#020308] relative border-l border-white/5 shadow-[inset_20px_0_60px_rgba(0,0,0,0.8)]">
+             <div className="px-6 py-4 border-b border-white/5 bg-white/[0.01] flex items-center justify-between">
+                <span className="text-[10px] font-black text-primary flex items-center gap-3 tracking-[0.2em]">
+                   <div className="w-2 h-2 rounded-full bg-primary shadow-[0_0_10px_rgba(0,240,255,1)] animate-ping" /> REALTIME_UPLINK
                 </span>
                 <button 
                   onClick={() => setCommandOutput([])}
-                  className="text-[10px] text-muted-foreground hover:text-red-400 transition-colors flex items-center gap-1"
+                  className="text-[9px] font-bold text-muted-foreground hover:text-red-500 transition-colors flex items-center gap-2 uppercase tracking-widest"
                 >
-                  <Trash2 className="w-3 h-3" /> CLEAR
+                  <Trash2 className="w-3.5 h-3.5" /> PURGE_LOGS
                 </button>
              </div>
              
-             <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono scrollbar-thin scrollbar-thumb-primary/20">
+             <div className="flex-1 overflow-y-auto p-8 space-y-6 font-mono scrollbar-thin scrollbar-thumb-white/5 selection:bg-primary/30">
                 {commandOutput.length === 0 ? (
-                  <div className="h-full items-center justify-center flex flex-col opacity-20 filter grayscale">
-                      <Terminal className="w-12 h-12 mb-2" />
-                      <p className="text-[10px]">AWAITING LINK ESTABLISHMENT...</p>
+                  <div className="h-full items-center justify-center flex flex-col opacity-10 space-y-4">
+                      <Terminal className="w-16 h-16" />
+                      <p className="text-[9px] font-black tracking-[0.5em] uppercase">SYSTEM_IDLE: AWAITING_INPUT</p>
                   </div>
                 ) : (
                   commandOutput.map((entry) => (
-                    <div key={entry.id} className="text-[11px] animate-in fade-in slide-in-from-left-2 duration-300">
-                      <div className="text-primary/60 mb-1 border-l-2 border-primary/20 pl-2">
-                        &gt; {entry.cmd}
+                    <div key={entry.id} className="text-[11px] space-y-2 group animate-in slide-in-from-bottom-2 duration-300">
+                      <div className="flex items-center gap-3">
+                         <div className="h-px flex-1 bg-white/[0.05]" />
+                         <span className="text-[9px] font-black text-white/20 uppercase tracking-widest">
+                           SIGNAL_RECEIVED
+                         </span>
+                         <div className="h-px flex-1 bg-white/[0.05]" />
                       </div>
-                      <div className="pl-3 text-white/90 whitespace-pre-wrap break-all leading-relaxed">
+                      <div className="text-primary font-bold opacity-70 group-hover:opacity-100 transition-opacity">
+                        <span className="text-white/20 mr-2">#</span> {entry.cmd.toUpperCase()}
+                      </div>
+                      <div className="pl-4 text-white/60 whitespace-pre-wrap break-all leading-relaxed font-mono bg-white/[0.02] p-4 rounded-xl border border-white/5 group-hover:border-white/10 transition-all">
                         {entry.output}
                       </div>
                     </div>
@@ -455,16 +462,16 @@ export default function CommandPanel({ selectedClient }: CommandPanelProps) {
              </div>
 
              {/* Direct Input Overlay */}
-             <div className="p-4 bg-black/80 backdrop-blur-md border-t border-white/5">
+             <div className="p-8 bg-black/60 backdrop-blur-2xl border-t border-white/5">
                 <div className="relative group">
-                   <div className="absolute left-3 top-1/2 -translate-y-1/2 text-primary font-bold text-xs">$</div>
+                   <div className="absolute left-4 top-1/2 -translate-y-1/2 text-primary font-black text-[10px] tracking-tighter opacity-50">$ ROOT@C2:</div>
                    <input
                      type="text"
                      value={inputValue}
                      onChange={(e) => setInputValue(e.target.value)}
                      onKeyPress={(e) => e.key === 'Enter' && handleDirectCommand()}
-                     placeholder="DIRECT SHELL EXECUTION..."
-                     className="w-full pl-7 pr-4 py-2.5 bg-white/[0.03] hover:bg-white/[0.05] border border-white/10 rounded-lg text-xs text-white font-mono transition-all focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
+                     placeholder="EXECUTE RAW KERNEL SIGNAL..."
+                     className="w-full pl-24 pr-6 py-4 bg-white/[0.02] hover:bg-white/[0.04] border border-white/10 rounded-2xl text-[11px] text-white font-mono transition-all focus:outline-none focus:border-primary/50 focus:ring-4 focus:ring-primary/5 placeholder:text-muted-foreground/10"
                    />
                 </div>
              </div>
