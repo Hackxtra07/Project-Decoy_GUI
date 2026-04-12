@@ -1,11 +1,11 @@
 'use client'
 
-import { Package, Monitor, Zap, Settings, LogOut, Database, BarChart3, ShieldAlert, Activity, FolderOpen } from 'lucide-react'
+import { Package, Monitor, Zap, Settings, LogOut, Database, BarChart3, ShieldAlert, Activity, FolderOpen, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 interface SidebarProps {
   activeTab: string
-  setActiveTab: (tab: 'overview' | 'clients' | 'monitoring' | 'commands' | 'loot' | 'analytics' | 'tasks' | 'files') => void
+  setActiveTab: (tab: 'overview' | 'clients' | 'monitoring' | 'commands' | 'loot' | 'analytics' | 'tasks' | 'files' | 'editor') => void
 }
 
 export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
@@ -14,6 +14,7 @@ export default function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
     { id: 'clients', label: 'Clients', icon: Package },
     { id: 'commands', label: 'Commands', icon: Zap },
     { id: 'files', label: 'File Browser', icon: FolderOpen },
+    { id: 'editor', label: 'File Editor', icon: FileText },
     { id: 'monitoring', label: 'Monitoring', icon: ShieldAlert },
     { id: 'loot', label: 'Loot', icon: Database },
     { id: 'tasks', label: 'Active Tasks', icon: Activity },

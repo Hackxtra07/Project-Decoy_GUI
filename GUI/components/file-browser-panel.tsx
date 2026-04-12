@@ -77,7 +77,7 @@ function getFileIconColor(item: FileItem): string {
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
-export default function FileBrowserPanel({ selectedClient }: { selectedClient: string | null }) {
+export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedClient: string | null; onEdit?: (path: string) => void }) {
   const [drives, setDrives] = useState<Drive[]>([])
   const [currentPath, setCurrentPath] = useState('')
   const [parentPath, setParentPath] = useState('')
@@ -698,6 +698,14 @@ export default function FileBrowserPanel({ selectedClient }: { selectedClient: s
                 className="w-full flex items-center gap-3 px-3 py-2 text-[10px] font-black text-foreground/80 hover:text-primary hover:bg-primary/10 rounded-lg transition-all uppercase tracking-widest"
               >
                 <Download className="w-4 h-4" /> Pull_Data
+              </button>
+            )}
+            {!ctxMenu.item.is_dir && onEdit && (
+              <button
+                onClick={() => { onEdit(ctxMenu?.item.path as string); setCtxMenu(null) }}
+                className="w-full flex items-center gap-3 px-3 py-2 text-[10px] font-black text-foreground/80 hover:text-cyan-400 hover:bg-cyan-400/10 rounded-lg transition-all uppercase tracking-widest"
+              >
+                <FileText className="w-4 h-4" /> Edit_Raw
               </button>
             )}
             <button

