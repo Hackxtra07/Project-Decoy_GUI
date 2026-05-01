@@ -1,3 +1,4 @@
 pymongo[srv]
 cryptography
 colorama
+psutil

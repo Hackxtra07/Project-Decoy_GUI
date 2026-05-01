@@ -1,4 +1,5 @@
 import { getDatabase } from './db'
+import fs from 'fs'
 
 export interface LootFile {
   id: string
@@ -45,11 +46,23 @@ export async function getLootContent(id: string): Promise<Buffer | null> {
   const db = await getDatabase()
   
   try {
-    // Standard ID lookup (Numeric in SQLite auto-inc, or String if UUID)
-    const row = await db.prepare(`SELECT data FROM loot WHERE id = ?`).get([id])
-    if (!row || !row.data) return null
+    // First try to get the row to see if we have a path or data
+    const row = await db.prepare(`SELECT * FROM loot WHERE id = ?`).get([id])
+    if (!row) return null
     
-    return Buffer.from(row.data)
+    // If we have a blob in the DB (MongoDB or if migration added it to SQLite), use it
+    if (row.data) return Buffer.from(row.data)
+    
+    // Fallback: Read from filesystem path
+    if (row.path && fs.existsSync(row.path)) {
+      try {
+        return fs.readFileSync(row.path)
+      } catch (e) {
+        console.error(`[Loot Lib] Failed to read file at ${row.path}:`, e)
+      }
+    }
+    
+    return null
   } catch (e) {
     console.error('[Loot Lib] Error fetching data:', e)
     return null

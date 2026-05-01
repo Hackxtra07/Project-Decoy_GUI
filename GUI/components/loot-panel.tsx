@@ -261,9 +261,53 @@ export default function LootPanel() {
                     </div>
                 ) : fileContent ? (
                   <div className="h-full w-full overflow-auto">
-                    <pre className="p-6 font-mono text-sm leading-relaxed text-blue-100/90 whitespace-pre">
-                      {fileContent}
-                    </pre>
+                    {selectedFile.name.endsWith('.json') && fileContent && fileContent.includes('"w":') ? (
+                      <div className="p-6 space-y-4">
+                        <div className="flex items-center justify-between mb-4">
+                          <h3 className="text-sm font-black text-primary tracking-widest uppercase">Structured_Keylog_Timeline</h3>
+                          <Badge variant="outline" className="text-[10px] border-primary/20 text-primary">JSON_FORMAT</Badge>
+                        </div>
+                        <div className="space-y-2">
+                          {(() => {
+                            try {
+                              const logs = JSON.parse(fileContent);
+                              let currentWindow = "";
+                              return logs.map((log: any, idx: number) => {
+                                const showWindow = log.w !== currentWindow;
+                                if (showWindow) currentWindow = log.w;
+                                return (
+                                  <div key={idx} className="group">
+                                    {showWindow && (
+                                      <div className="flex items-center gap-2 mt-4 mb-1">
+                                        <div className="h-px flex-1 bg-white/5" />
+                                        <span className="text-[10px] font-mono text-primary/60 uppercase px-2 py-0.5 bg-white/5 rounded border border-white/5">
+                                          {log.w}
+                                        </span>
+                                        <div className="h-px flex-1 bg-white/5" />
+                                      </div>
+                                    )}
+                                    <div className="flex items-baseline gap-3 px-2 py-1 hover:bg-white/5 rounded transition-colors">
+                                      <span className="text-[10px] font-mono text-muted-foreground w-16 opacity-40 shrink-0">
+                                        {new Date(log.t * 1000).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                      </span>
+                                      <span className="text-sm font-medium text-blue-100/90 break-all">
+                                        {log.k === '\n' ? <span className="text-primary/40 font-mono text-xs">[ENTER]</span> : log.k}
+                                      </span>
+                                    </div>
+                                  </div>
+                                );
+                              });
+                            } catch (e) {
+                              return <pre className="font-mono text-sm">{fileContent}</pre>;
+                            }
+                          })()}
+                        </div>
+                      </div>
+                    ) : (
+                      <pre className="p-6 font-mono text-sm leading-relaxed text-blue-100/90 whitespace-pre">
+                        {fileContent}
+                      </pre>
+                    )}
                   </div>
                 ) : (
                   <div className="w-full h-full flex flex-col items-center justify-center gap-4 text-muted-foreground">

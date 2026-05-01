@@ -87,9 +87,12 @@ export default function MonitoringPanel({ selectedClient }: MonitoringPanelProps
             }
 
             if (latest.running_processes) {
-                const procList = Array.isArray(latest.running_processes) 
-                    ? latest.running_processes 
-                    : (typeof latest.running_processes === 'string' ? JSON.parse(latest.running_processes) : []);
+                let procList = latest.running_processes;
+                if (typeof procList === 'string') {
+                    try { procList = JSON.parse(procList); } catch { procList = []; }
+                }
+                if (!Array.isArray(procList)) procList = [];
+
                 setProcessData(procList.map((p: any, idx: number) => ({
                     pid: p.pid || Math.floor(Math.random() * 50000),
                     name: typeof p === 'string' ? p : (p.name || 'Unknown'),
@@ -100,9 +103,12 @@ export default function MonitoringPanel({ selectedClient }: MonitoringPanelProps
             }
 
             if (latest.network_connections) {
-                const connList = Array.isArray(latest.network_connections)
-                    ? latest.network_connections
-                    : (typeof latest.network_connections === 'string' ? JSON.parse(latest.network_connections) : []);
+                let connList = latest.network_connections;
+                if (typeof connList === 'string') {
+                    try { connList = JSON.parse(connList); } catch { connList = []; }
+                }
+                if (!Array.isArray(connList)) connList = [];
+
                 setNetworkConnections(connList.map((c: any) => ({
                     protocol: c.protocol || 'TCP',
                     local: c.laddr || c.local_address || '127.0.0.1:0',
