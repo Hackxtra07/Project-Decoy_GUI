@@ -1307,6 +1307,13 @@ class AdvancedC2Server:
                         else:
                             print(f"{Fore.WHITE}{data}")
                         print(f"{Fore.CYAN}{'='*40}{Style.RESET_ALL}\n")
+                        
+                        # Re-print prompt since asynchronous output clobbers it
+                        if getattr(self, 'parser', None):
+                            if getattr(self.parser, 'shell_mode', False):
+                                print(f"{Fore.GREEN}SHELL@{self.selected_client or 'all'}{Style.RESET_ALL} > ", end='', flush=True)
+                            else:
+                                print(f"{Fore.GREEN}C2@{self.selected_client or 'all'}{Style.RESET_ALL} > ", end='', flush=True)
             except Exception as e:
                 pass
             time.sleep(2)

