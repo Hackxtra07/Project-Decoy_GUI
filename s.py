@@ -843,8 +843,11 @@ class AdvancedC2Server:
         except Exception as e:
             self.logger.error(f"Session initialization failed [{addr[0]}]: {e}")
         finally:
-            self._remove_client(cid)
-            sock.close()
+            self._remove_client(cid, sock=sock)
+            try:
+                sock.close()
+            except Exception:
+                pass
 
     def _send_raw(self, sock, data): sock.sendall(len(data).to_bytes(4, 'big') + data)
     def _recv_raw(self, sock):
@@ -1167,9 +1170,16 @@ class AdvancedC2Server:
                     motherboard=excluded.motherboard
             ''', (cid, ip, h, o, u, datetime.datetime.now().isoformat(), 'online', info.get('gpu'), info.get('motherboard')))
 
-    def _remove_client(self, cid):
+    def _remove_client(self, cid, sock=None):
         with self.client_lock:
             if cid in self.clients:
+                # Only remove if this thread owns the current socket entry.
+                # If the client reconnected before this thread's cleanup ran,
+                # the new connection will have registered a different socket —
+                # leave it untouched so the reconnect is not killed.
+                current_sock = self.clients[cid].get('sock')
+                if sock is not None and current_sock is not None and current_sock is not sock:
+                    return  # A newer connection already owns this slot — don't evict it
                 del self.clients[cid]
                 if self.selected_client == cid: self.selected_client = None
                 self.logger.warning(f"Session Terminated: {cid}")
@@ -1178,9 +1188,8 @@ class AdvancedC2Server:
                 self.db.db.clients.update_one({"id": cid}, {"$set": {"status": "offline", "last_seen": datetime.datetime.now().isoformat()}})
                 self.db.db.commands.update_many({"client_id": cid, "is_active": 1}, {"$set": {"is_active": 0}})
             else:
-                self.db.execute("UPDATE clients SET status = 'offline', last_seen = ? WHERE id = ?", 
+                self.db.execute("UPDATE clients SET status = 'offline', last_seen = ? WHERE id = ?",
                                (datetime.datetime.now().isoformat(), cid))
-                # Mark all tasks as inactive for this client
                 self.db.execute("UPDATE commands SET is_active = 0 WHERE client_id = ? AND is_active = 1", (cid,))
         except: pass
 
