@@ -1316,7 +1316,7 @@ class AdvancedC2Server:
                                 print(f"{Fore.GREEN}C2@{self.selected_client or 'all'}{Style.RESET_ALL} > ", end='', flush=True)
             except Exception as e:
                 pass
-            time.sleep(2)
+            time.sleep(0.2)
 
     def _poll_mongodb_handshakes(self):
         """Poll MongoDB for new clients waiting for connection via DB-only transport"""

