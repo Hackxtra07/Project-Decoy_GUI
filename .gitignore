@@ -9,7 +9,7 @@ build/
 *.sqlite
 data/
 loot/
-
+__pycache__
 # Environment variables
 .env
 .env*.local
